@@ -1,0 +1,19 @@
+# Environments
+.env
+.venv/
+__pycache__/
+
+# Node
+fairsight-ui/node_modules/
+node_modules/
+
+# OS/System files
+.DS_Store
+Thumbs.db
+
+# Database and Logs
+*.sqlite
+*.db
+*.db-shm
+*.db-wal
+*.log

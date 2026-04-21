@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Base ────────────────────────────────────────────────────────────── */
+html {
+  font-family: 'Inter', system-ui, sans-serif;
+  background-color: #F9F9F7;
+  color: #111827;
+}
+
+body {
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Consistent section rhythm ───────────────────────────────────────── */
+.section {
+  padding-top: 5rem;
+  padding-bottom: 5rem;
+}
+
+/* ── Focus rings ─────────────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid #1D4ED8;
+  outline-offset: 2px;
+}

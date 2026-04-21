@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pandas
+scikit-learn
+shap
+aif360
+dice-ml
+google-generativeai
+pytest
+pytest-asyncio
+httpx
+python-multipart
+reportlab
