@@ -81,19 +81,24 @@ class ProxyDetectionService:
         ValueError
             When all requested protected columns are absent from the CSV.
         """
+        from app.utils.data_utils import normalize_dataframe_headers, normalize_string
         df = pd.read_csv(io.BytesIO(raw_bytes))
+        df = normalize_dataframe_headers(df)
 
-        present_protected = [c for c in protected_columns if c in df.columns]
-        missing_protected = [c for c in protected_columns if c not in df.columns]
+        # Normalize requested column names
+        norm_protected_cols = [normalize_string(c) for c in protected_columns]
+        
+        present_protected = [c for c in norm_protected_cols if c in df.columns]
+        missing_protected = [c for c in norm_protected_cols if c not in df.columns]
 
         if not present_protected:
-            raise ValueError(
-                f"None of the requested protected columns were found in the CSV. "
-                f"Requested: {protected_columns}. "
-                f"Available: {list(df.columns)}"
-            )
-
-        non_protected_cols = [c for c in df.columns if c not in protected_columns]
+            print(f"[ProxyService] None of the requested protected columns {norm_protected_cols} were found in the dataset. Skipping proxy analysis.")
+            return {
+                "missing_protected": missing_protected,
+                "features": [],
+                "high_risk_features": []
+            }
+        non_protected_cols = [c for c in df.columns if c not in norm_protected_cols]
 
         # Pre-compute numeric representations for every column used
         encoded: Dict[str, pd.Series] = {

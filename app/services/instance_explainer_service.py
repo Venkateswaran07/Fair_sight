@@ -56,12 +56,21 @@ def _coerce_instance(
     raw: Dict[str, Any],
     feature_cols: List[str],
     encoding_map: Dict[str, Dict[Any, int]],
+    df_train: pd.DataFrame,
 ) -> pd.DataFrame:
     """
     Build a single-row DataFrame from *raw*, keeping only *feature_cols*.
     Missing feature values default to 0; categorical encoding is applied.
     """
-    row = {col: raw.get(col, 0) for col in feature_cols}
+    from app.utils.data_utils import translate_value_to_numeric
+    row = {}
+    for col in feature_cols:
+        val = raw.get(col, 0)
+        # Try to translate string inputs (like 'male') to numeric if needed
+        if col in df_train.columns:
+            val = translate_value_to_numeric(val, df_train[col])
+        row[col] = val
+        
     df = pd.DataFrame([row])
     df = _apply_encoding(df, encoding_map)
     return df
@@ -115,8 +124,14 @@ class InstanceExplainerService:
         ValueError
             On missing target column, bad instance JSON, or mismatched features.
         """
-        # ── Load & validate training data ───────────────────────────────
+        # --- Re-applying Smart Mapping (Force Reload) ---
+        from app.utils.data_utils import normalize_dataframe_headers, normalize_string, normalize_dictionary_keys
         df = pd.read_csv(io.BytesIO(raw_bytes))
+        df = normalize_dataframe_headers(df)
+        
+        # Normalize requested target string
+        target_column = normalize_string(target_column)
+
         if target_column not in df.columns:
             raise ValueError(
                 f"Target column '{target_column}' not found in CSV. "
@@ -128,13 +143,33 @@ class InstanceExplainerService:
             raise ValueError("No feature columns found after removing the target column.")
 
         X_train = df[feature_cols].copy()
-        y_train = df[target_column]
+        
+        # ── Target Normalization ─────────────────────────────────────────
+        # Ensure y_train is strictly binary (0/1) to prevent SHAP memory explosion
+        _y = df[target_column].copy()
+        
+        # 1. Auto-bin continuous targets
+        if pd.api.types.is_numeric_dtype(_y) and _y.nunique() > 5:
+            median_val = _y.median()
+            _y = (_y > median_val).astype(int)
+            print(f"[InstanceExplainer] Auto-binned continuous target '{target_column}' at median {median_val}")
+            
+        # 2. Label-encode string targets (e.g., 'Yes'/'No')
+        elif not pd.api.types.is_numeric_dtype(_y):
+            unique_labels = sorted(_y.dropna().unique(), key=str)
+            label_map = {lbl: i for i, lbl in enumerate(unique_labels)}
+            _y = _y.map(label_map)
+            print(f"[InstanceExplainer] Label-encoded target '{target_column}': {label_map}")
+
+        y_train = _y.astype(int)
 
         # ── Parse instance ───────────────────────────────────────────────
         try:
             instance_dict: Dict[str, Any] = json.loads(instance_raw)
             if not isinstance(instance_dict, dict):
                 raise ValueError
+            # Smart Map the applicant's columns too!
+            instance_dict = normalize_dictionary_keys(instance_dict)
         except (json.JSONDecodeError, ValueError):
             raise ValueError(
                 "instance must be a valid JSON object, "
@@ -150,7 +185,7 @@ class InstanceExplainerService:
         model.fit(X_encoded, y_train)
 
         # ── Prepare instance ─────────────────────────────────────────────
-        instance_df = _coerce_instance(instance_dict, feature_cols, encoding_map)
+        instance_df = _coerce_instance(instance_dict, feature_cols, encoding_map, df)
 
         # Predict for context
         pred_class = model.predict(instance_df)[0]

@@ -1,21 +1,15 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Navbar from '../components/Navbar'
 import DropZone from '../components/DropZone'
 import Spinner from '../components/Spinner'
 
-const API_URL = 'http://localhost:8000/audit/demographics'
-
 /* ──────────────────────────────────────────────────────────────────────────
    UploadPage — Screen 1
-   - Drag-and-drop zone: training dataset CSV
-   - Drag-and-drop zone: predictions CSV (needs prediction + ground_truth cols)
-   - Text input: comma-separated protected column names
-   - Submit → POST /audit/demographics via FormData
-   - States: idle → loading → success | error
+   - Original Layout (Vertical Form)
+   - Enhanced with Live Data Preview (from Glass Box)
 ────────────────────────────────────────────────────────────────────────── */
 
-/** Inline field error message. */
 function FieldError({ msg }) {
   return msg ? (
     <p role="alert" className="text-xs text-red-600 mt-1">{msg}</p>
@@ -32,35 +26,94 @@ export default function UploadPage() {
 
   /* ── UI state ────────────────────────────────────────────────── */
   const [loading, setLoading]   = useState(false)
-  const [result, setResult]     = useState(null)   // success payload
-  const [error, setError]       = useState(null)   // error string
+  const [result, setResult]     = useState(null)
+  const [error, setError]       = useState(null)
   const [fieldErrors, setFieldErrors] = useState({})
+  
+  // Preview state
+  const [csvPreview, setCsvPreview] = useState(null)
+  const [previewPage, setPreviewPage] = useState(0)
+  const [previewSearch, setPreviewSearch] = useState('')
+  const [isAnalyzingHeaders, setIsAnalyzingHeaders] = useState(false)
 
-  /* ── Validation ──────────────────────────────────────────────── */
-  function validate() {
+  /* ── Auto-parse CSV file for preview ─────────────────────────── */
+  useEffect(() => {
+    const fileToPreview = predictFile || datasetFile
+    if (!fileToPreview) {
+        setCsvPreview(null)
+        return
+    }
+    
+    // Immediate background upload to get AI-mapped headers
+    const uploadToGetHeaders = async () => {
+        setIsAnalyzingHeaders(true)
+        const formData = new FormData()
+        formData.append('file', fileToPreview)
+        try {
+            const res = await fetch('http://localhost:8000/audit/upload', { method: 'POST', body: formData })
+            if (res.ok) {
+                const data = await res.json()
+                if (data && data.headers) {
+                    // Update preview with AI-NORMALIZED data from backend
+                    setCsvPreview({ 
+                        headers: data.headers, 
+                        allRows: data.preview_rows, 
+                        total: data.total_rows 
+                    })
+                    setIsAnalyzingHeaders(false)
+                    return
+                }
+            }
+        } catch (e) {
+            console.error("Auto-mapping upload failed", e)
+        }
+
+        // Fallback: Local parsing
+        const reader = new FileReader()
+        reader.onload = (e) => {
+            const text = e.target.result
+            const lines = text.split(/\r?\n/).filter(line => line.trim())
+            if (lines.length > 0) {
+                const stripQuotes = (s) => s.trim().replace(/^["'](.+)["']$/, '$1')
+                const headers = lines[0].split(',').map(stripQuotes)
+                const allRows = lines.slice(1).map(line => line.split(',').map(stripQuotes))
+                setCsvPreview({ headers, allRows, total: lines.length - 1 })
+            }
+            setIsAnalyzingHeaders(false)
+        }
+        reader.readAsText(fileToPreview)
+    }
+    
+    uploadToGetHeaders()
+  }, [datasetFile, predictFile])
+
+  const handleHeaderClick = (header) => {
+      const current = protectedCols.split(',').map(s => s.trim()).filter(Boolean)
+      if (current.includes(header)) {
+          setProtectedCols(current.filter(h => h !== header).join(', '))
+      } else {
+          setProtectedCols([...current, header].join(', '))
+      }
+  }
+
+  /* ── Submit ──────────────────────────────────────────────────── */
+  async function handleSubmit(e) {
+    if (e) e.preventDefault()
+    
+    // Validation
     const errs = {}
     if (!datasetFile) errs.dataset = 'Please upload a training dataset CSV.'
     if (!predictFile) errs.predict = 'Please upload a predictions CSV.'
     if (!protectedCols.trim()) errs.cols = 'Enter at least one protected column name.'
     setFieldErrors(errs)
-    return Object.keys(errs).length === 0
-  }
-
-  /* ── Submit ──────────────────────────────────────────────────── */
-  async function handleSubmit(e) {
-    e.preventDefault()
-    if (!validate()) return
+    if (Object.keys(errs).length > 0) return
 
     setLoading(true)
     setError(null)
     setResult(null)
 
     try {
-      // Parse protected_columns into a JSON array string as the API expects
-      const cols = protectedCols
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
+      const cols = protectedCols.split(',').map(s => s.trim()).filter(Boolean)
 
       const formDemo = new FormData()
       formDemo.append('file', datasetFile)
@@ -74,7 +127,6 @@ export default function UploadPage() {
       
       const formFair = new FormData()
       formFair.append('file', predictFile)
-      // The fairness endpoint only analyzes a single binary column at a time, so we pass the first one.
       formFair.append('protected_column', cols[0])
       formFair.append('positive_label', '1')
 
@@ -91,7 +143,6 @@ export default function UploadPage() {
         return res.json()
       }
 
-      // Fetch all four endpoints in parallel
       const [demographics, performance, fairness, proxies] = await Promise.all([
         fetchApi('/audit/demographics', formDemo),
         fetchApi('/audit/performance', formPerf),
@@ -108,177 +159,210 @@ export default function UploadPage() {
     }
   }
 
-  /* ── Success banner ──────────────────────────────────────────── */
   if (result) {
     return (
       <div className="min-h-screen bg-[#F9F9F7]">
         <Navbar />
         <main className="max-w-2xl mx-auto px-6 section">
           <div className="border border-green-200 bg-green-50 rounded-lg p-6 text-center">
-            {/* Check icon */}
-            <svg className="w-10 h-10 text-green-500 mx-auto" fill="none" stroke="currentColor"
-                 strokeWidth={1.5} viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round"
-                    d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+            <svg className="w-10 h-10 text-green-500 mx-auto" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
             </svg>
             <h2 className="mt-4 text-xl font-semibold text-gray-900">Audit ready</h2>
             <p className="mt-2 text-gray-600">
               Analysed <strong>{result.demographics?.num_rows?.toLocaleString()}</strong> rows
-              across <strong>{result.demographics?.columns_analyzed?.length ?? 0}</strong> protected column(s).
-              {result.missing_columns?.length > 0 && (
-                <span className="block mt-1 text-yellow-700 text-sm">
-                  Columns not found in CSV: {result.missing_columns.join(', ')}
-                </span>
-              )}
             </p>
-
             <div className="mt-6 flex flex-col sm:flex-row gap-3 justify-center">
               <button
                 onClick={() => {
                   sessionStorage.setItem('fairsight_results', JSON.stringify(result))
                   navigate('/results')
                 }}
-                className="bg-accent hover:bg-accent-hover text-white font-medium
-                           px-6 py-2.5 rounded transition-colors"
+                className="bg-accent hover:bg-accent-hover text-white font-medium px-6 py-2.5 rounded transition-colors"
               >
                 View results
               </button>
-              <button
-                onClick={() => { setResult(null); setDatasetFile(null); setPredictFile(null); setProtectedCols('') }}
-                className="border border-gray-300 text-gray-700 hover:bg-gray-100
-                           font-medium px-6 py-2.5 rounded transition-colors"
-              >
+              <button onClick={() => setResult(null)} className="border border-gray-300 text-gray-700 hover:bg-gray-100 font-medium px-6 py-2.5 rounded transition-colors">
                 New audit
               </button>
             </div>
-
-            {/* Raw JSON for devs */}
-            <details className="mt-6 text-left">
-              <summary className="text-xs text-gray-400 cursor-pointer select-none hover:text-gray-600">
-                Show raw API response
-              </summary>
-              <pre className="mt-2 text-xs bg-white border border-gray-200 rounded p-4
-                              overflow-auto max-h-64 text-gray-700">
-                {JSON.stringify(result, null, 2)}
-              </pre>
-            </details>
           </div>
         </main>
       </div>
     )
   }
 
-  /* ── Main form ───────────────────────────────────────────────── */
+  const selectedList = protectedCols.split(',').map(s => s.trim()).filter(Boolean)
+
   return (
     <div className="min-h-screen bg-[#F9F9F7]">
       <Navbar />
 
-      <main className="max-w-2xl mx-auto px-6 section">
-        {/* Page header */}
+      <main className="max-w-6xl mx-auto px-6 py-10">
         <div className="mb-8">
           <h1 className="text-2xl font-bold text-gray-900">Upload your data</h1>
-          <p className="mt-2 text-gray-600">
-            Provide your dataset, your model's predictions, and the columns you
-            want to audit for bias.
-          </p>
+          <p className="mt-2 text-gray-600">Provide your dataset and predictions to audit for bias.</p>
         </div>
 
-        <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-7">
-
-          {/* ── Zone 1: Training dataset ──────────────────────── */}
-          <div>
-            <label className="block text-sm font-semibold text-gray-800 mb-2">
-              Training dataset
-            </label>
-            <DropZone
-              label="Drop your dataset CSV here"
-              hint="Any columns; used for demographics & proxy analysis"
-              file={datasetFile}
-              onFile={(f) => { setDatasetFile(f); setFieldErrors((e) => ({ ...e, dataset: '' })) }}
-            />
-            <FieldError msg={fieldErrors.dataset} />
-          </div>
-
-          {/* ── Zone 2: Predictions CSV ───────────────────────── */}
-          <div>
-            <label className="block text-sm font-semibold text-gray-800 mb-2">
-              Predictions CSV
-              <span className="ml-2 text-xs font-normal text-gray-500">
-                (requires <code className="bg-gray-100 px-1 rounded">prediction</code>
-                and <code className="bg-gray-100 px-1 rounded">ground_truth</code> columns)
-              </span>
-            </label>
-            <DropZone
-              label="Drop your predictions CSV here"
-              hint="Must contain: prediction, ground_truth, + any protected columns"
-              file={predictFile}
-              onFile={(f) => { setPredictFile(f); setFieldErrors((e) => ({ ...e, predict: '' })) }}
-            />
-            <FieldError msg={fieldErrors.predict} />
-          </div>
-
-          {/* ── Protected columns input ───────────────────────── */}
-          <div>
-            <label
-              htmlFor="protected-cols"
-              className="block text-sm font-semibold text-gray-800 mb-2"
-            >
-              Protected columns
-            </label>
-            <input
-              id="protected-cols"
-              type="text"
-              placeholder="gender, race, age"
-              value={protectedCols}
-              onChange={(e) => {
-                setProtectedCols(e.target.value)
-                setFieldErrors((err) => ({ ...err, cols: '' }))
-              }}
-              className="w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm
-                         text-gray-900 placeholder-gray-400 bg-white
-                         focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent"
-            />
-            <p className="mt-1.5 text-xs text-gray-500">
-              Comma-separated column names that contain protected attributes.
-            </p>
-            <FieldError msg={fieldErrors.cols} />
-          </div>
-
-          {/* ── Error banner ──────────────────────────────────── */}
-          {error && (
-            <div role="alert" className="border border-red-200 bg-red-50
-                                         rounded-lg px-4 py-3 text-sm text-red-700">
-              <strong className="font-semibold">Request failed: </strong>{error}
+        <div className="flex flex-col lg:flex-row gap-10">
+          {/* Left: Original Form */}
+          <form onSubmit={handleSubmit} noValidate className="flex-1 flex flex-col gap-7 max-w-xl">
+            <div>
+              <label className="block text-sm font-semibold text-gray-800 mb-2">Training dataset</label>
+              <DropZone
+                label="Drop your dataset CSV here"
+                hint="Used for demographics & proxy analysis"
+                file={datasetFile}
+                onFile={(f) => { setDatasetFile(f); setFieldErrors(e => ({ ...e, dataset: '' })) }}
+              />
+              <FieldError msg={fieldErrors.dataset} />
             </div>
-          )}
 
-          {/* ── Submit ────────────────────────────────────────── */}
-          <div>
+            <div>
+              <label className="block text-sm font-semibold text-gray-800 mb-2">Predictions CSV</label>
+              <DropZone
+                label="Drop your predictions CSV here"
+                hint="Requires prediction and ground_truth columns"
+                file={predictFile}
+                onFile={(f) => { setPredictFile(f); setFieldErrors(e => ({ ...e, predict: '' })) }}
+              />
+              <FieldError msg={fieldErrors.predict} />
+            </div>
+
+            <div>
+              <label htmlFor="protected-cols" className="block text-sm font-semibold text-gray-800 mb-2">
+                Protected columns
+              </label>
+              <input
+                id="protected-cols"
+                type="text"
+                placeholder="gender, race, age"
+                value={protectedCols}
+                onChange={(e) => {
+                  setProtectedCols(e.target.value)
+                  setFieldErrors(err => ({ ...err, cols: '' }))
+                }}
+                className="w-full border border-gray-300 rounded-lg px-4 py-2.5 text-sm text-gray-900 focus:ring-2 focus:ring-accent outline-none"
+              />
+              <p className="mt-1.5 text-xs text-gray-500">Click headers in the table to select, or type here.</p>
+              <FieldError msg={fieldErrors.cols} />
+            </div>
+
+            {error && (
+              <div className="border border-red-200 bg-red-50 rounded-lg px-4 py-3 text-sm text-red-700">
+                <strong className="font-semibold">Request failed: </strong>{error}
+              </div>
+            )}
+
             <button
               type="submit"
               disabled={loading}
-              className="inline-flex items-center gap-3 bg-accent hover:bg-accent-hover
-                         disabled:opacity-60 disabled:cursor-not-allowed
-                         text-white font-medium px-6 py-2.5 rounded transition-colors"
+              className="bg-accent hover:bg-accent-hover disabled:opacity-60 text-white font-medium px-8 py-3 rounded-lg transition-all self-start flex items-center gap-2"
             >
-              {loading ? (
-                <>
-                  <Spinner size={16} label="Running audit…" />
-                  <span>Running audit…</span>
-                </>
-              ) : (
-                'Submit for audit'
-              )}
+              {loading ? <Spinner size={16} /> : 'Submit for audit'}
             </button>
-          </div>
+          </form>
 
-          {/* ── Note ──────────────────────────────────────────── */}
-          <p className="text-xs text-gray-400">
-            Files are sent to your local FairSight API at{' '}
-            <code className="bg-gray-100 px-1 rounded">localhost:8000</code>.
-            Nothing is stored remotely.
-          </p>
-        </form>
+          {/* Right: Glass Box Style Preview */}
+          <div className="flex-[1.5] flex flex-col min-h-[500px]">
+             {csvPreview ? (() => {
+                 // 1. Filter rows by search
+                 const searchLower = previewSearch.toLowerCase()
+                 let filteredTokens = []
+                 for(let i=0; i<csvPreview.allRows.length; i++) {
+                     const row = csvPreview.allRows[i]
+                     if (!searchLower || row.some(cell => cell.toLowerCase().includes(searchLower))) {
+                         filteredTokens.push({ originalIndex: i + 1, row })
+                     }
+                 }
+                 
+                 // 2. Paginate (15 per page)
+                 const rowsPerPage = 15
+                 const totalPages = Math.ceil(filteredTokens.length / rowsPerPage)
+                 const currentPage = Math.min(previewPage, Math.max(0, totalPages - 1))
+                 
+                 const startIndex = currentPage * rowsPerPage
+                 const paginatedRows = filteredTokens.slice(startIndex, startIndex + rowsPerPage)
+                 const isSearching = previewSearch.trim() !== ''
+
+                 return (
+                 <div className="border border-gray-200 rounded-lg bg-white overflow-hidden shadow-sm flex flex-col h-full">
+                     <div className="bg-gray-50 px-4 py-3 border-b border-gray-200 flex flex-col gap-2">
+                         <div className="flex justify-between items-center">
+                             <div className="flex items-center gap-2">
+                                <span className="text-sm font-bold text-gray-700 uppercase tracking-tight">Live Data Preview</span>
+                                {isAnalyzingHeaders && <Spinner size={12} label="AI analyzing headers..." />}
+                             </div>
+                             <span className="text-[10px] text-gray-500 font-medium">
+                                {isSearching ? `Matched ${filteredTokens.length}` : `Total ${csvPreview.total} rows`}
+                             </span>
+                         </div>
+                         <div className="flex flex-col gap-1">
+                            <input 
+                                type="text"
+                                placeholder="Search data..."
+                                value={previewSearch}
+                                onChange={e => { setPreviewSearch(e.target.value); setPreviewPage(0); }}
+                                className="border border-gray-300 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-accent"
+                            />
+                            {isAnalyzingHeaders && <p className="text-[9px] text-accent animate-pulse">Syncing with AI mapping...</p>}
+                         </div>
+                     </div>
+                     <div className="overflow-auto flex-1">
+                         <table className="w-full text-left text-xs whitespace-nowrap">
+                             <thead className="bg-white sticky top-0 z-10 border-b">
+                                 <tr>
+                                     <th className="px-4 py-3 text-gray-400 font-normal">#</th>
+                                     {csvPreview.headers.map((h, i) => {
+                                         const isSelected = selectedList.includes(h);
+                                         return (
+                                             <th 
+                                                key={i} 
+                                                onClick={() => handleHeaderClick(h)}
+                                                className={`px-4 py-3 font-semibold cursor-pointer transition-colors ${isSelected ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
+                                             >
+                                                 {h}
+                                                 {isSelected && <span className="ml-1 text-[10px]">●</span>}
+                                             </th>
+                                         )
+                                     })}
+                                 </tr>
+                             </thead>
+                             <tbody className="divide-y divide-gray-100">
+                                 {paginatedRows.map((item, i) => (
+                                     <tr key={i}>
+                                         <td className="px-4 py-2 text-gray-400">{item.originalIndex}</td>
+                                         {item.row.map((cell, j) => {
+                                              const isSelected = selectedList.includes(csvPreview.headers[j]);
+                                              return (
+                                                  <td key={j} className={`px-4 py-2 ${isSelected ? 'bg-blue-50/30' : ''}`}>{cell}</td>
+                                              )
+                                         })}
+                                     </tr>
+                                 ))}
+                             </tbody>
+                         </table>
+                     </div>
+                     {totalPages > 1 && (
+                         <div className="bg-gray-50 px-4 py-2 border-t flex justify-between items-center text-[11px]">
+                             <button type="button" onClick={() => setPreviewPage(p => Math.max(0, p - 1))} disabled={currentPage === 0} className="text-gray-600 hover:text-black font-semibold disabled:text-gray-300">
+                                 &larr; Prev
+                             </button>
+                             <span className="text-gray-500 font-medium">Page {currentPage + 1} of {totalPages}</span>
+                             <button type="button" onClick={() => setPreviewPage(p => Math.min(totalPages - 1, p + 1))} disabled={currentPage >= totalPages - 1} className="text-gray-600 hover:text-black font-semibold disabled:text-gray-300">
+                                 Next &rarr;
+                             </button>
+                         </div>
+                     )}
+                 </div>
+                 )
+             })() : (
+                 <div className="border-2 border-dashed border-gray-200 rounded-lg bg-gray-50/50 flex flex-col items-center justify-center p-12 text-center h-full">
+                     <p className="text-gray-400 text-sm">Upload a CSV to preview your data and select audit columns</p>
+                 </div>
+             )}
+          </div>
+        </div>
       </main>
     </div>
   )

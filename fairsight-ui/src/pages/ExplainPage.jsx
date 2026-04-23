@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Navbar from '../components/Navbar'
 import DropZone from '../components/DropZone'
 import Spinner from '../components/Spinner'
@@ -7,13 +7,39 @@ import GlassBoxViewer from '../components/GlassBoxViewer'
 export default function ExplainPage() {
   const [datasetFile, setDatasetFile] = useState(null)
   const [targetColumn, setTargetColumn] = useState('prediction')
-  const [applicantId, setApplicantId] = useState('APP-0005')
+  const [applicantId, setApplicantId] = useState('1')
   const [audience, setAudience] = useState('hr_manager')
   const [proxyCols, setProxyCols] = useState('gender')
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   
+  const [csvPreview, setCsvPreview] = useState(null)
+  const [previewPage, setPreviewPage] = useState(0)
+  const [previewSearch, setPreviewSearch] = useState('')
+
+  // Auto-parse CSV file for preview
+  useEffect(() => {
+    if (!datasetFile) {
+        setCsvPreview(null)
+        return
+    }
+    const reader = new FileReader()
+    reader.onload = (e) => {
+        const text = e.target.result
+        const lines = text.split(/\r?\n/).filter(line => line.trim())
+        if (lines.length > 0) {
+            const headers = lines[0].split(',').map(s => s.trim())
+            // Store all rows for search/pagination
+            const allRows = lines.slice(1).map(line => line.split(',').map(s => s.trim()))
+            setCsvPreview({ headers, allRows, total: lines.length - 1 })
+            setPreviewPage(0)
+            setPreviewSearch('')
+        }
+    }
+    reader.readAsText(datasetFile)
+  }, [datasetFile])
+
   // States to pass to GlassBoxViewer
   const [decision, setDecision] = useState(null)
   const [topFeatures, setTopFeatures] = useState([])
@@ -37,30 +63,35 @@ export default function ExplainPage() {
         let activeInstanceJson = ""
         try {
             const fileText = await datasetFile.text()
-            const lines = fileText.split(/\r?\n/)
+            const lines = fileText.split(/\r?\n/).filter(line => line.trim()) // filter empty lines
             const headers = lines[0].split(',').map(s => s.trim())
-            let targetRow = null
-            for (let i = 1; i < lines.length; i++) {
-                const line = lines[i]
-                if (!line.trim()) continue
-                const fields = line.split(',')
-                if (fields[0].trim() === applicantId.trim()) {
-                    targetRow = fields
-                    break
-                }
+            
+            // Treat the input as a 1-based row number
+            const rowIndex = parseInt(applicantId, 10)
+            if (isNaN(rowIndex) || rowIndex < 1 || rowIndex >= lines.length) {
+                throw new Error(`Please enter a valid row number between 1 and ${lines.length - 1}.`)
             }
-            if (!targetRow) throw new Error(`Applicant ID '${applicantId}' not found in the dataset.`)
+            
+            const targetRow = lines[rowIndex].split(',')
+            
             let extractedJson = {}
             targetRow.forEach((val, idx) => {
                 const header = headers[idx]
-                if (header !== targetColumn && header !== 'applicant_id' && header !== 'ground_truth') {
+                if (header !== targetColumn && header !== 'ground_truth') {
                     const num = Number(val)
                     extractedJson[header] = isNaN(num) ? val.trim() : num
                 }
             })
+            // Remove applicant_id or any 'id' columns to prevent them being used as features
+            Object.keys(extractedJson).forEach(key => {
+                if (key.toLowerCase().includes('id') || key.toLowerCase() === 'no') {
+                    delete extractedJson[key]
+                }
+            })
+            
             activeInstanceJson = JSON.stringify(extractedJson)
         } catch (e) {
-            throw new Error(`Failed to extract applicant data: ${e.message}`)
+            throw new Error(`Failed to extract row data: ${e.message}`)
         }
 
         // 1. Fetch SHAP Explain
@@ -196,16 +227,110 @@ export default function ExplainPage() {
              </div>
           </div>
 
-          <div>
-             <label className="block text-sm font-semibold text-gray-800 mb-2">Applicant ID to Explain</label>
-             <input 
-                type="text"
-                value={applicantId}
-                onChange={e => setApplicantId(e.target.value)}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-                placeholder="e.g. APP-0005"
-             />
-             <p className="mt-1 text-xs text-gray-500">The system will automatically locate this applicant's profile from the dataset and analyze it.</p>
+          <div className="flex gap-4 items-start">
+             <div className="flex-1">
+                 <label className="block text-sm font-semibold text-gray-800 mb-2">Row Number to Explain (1-based)</label>
+                 <input 
+                    type="text"
+                    value={applicantId}
+                    onChange={e => setApplicantId(e.target.value)}
+                    className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+                    placeholder="e.g. 1"
+                 />
+                 <p className="mt-1 text-xs text-gray-500">
+                    Enter the row number from the CSV (1 for the first applicant, 2 for the second, etc.)
+                 </p>
+             </div>
+             
+             {csvPreview && (() => {
+                 // 1. Filter rows by search
+                 const searchLower = previewSearch.toLowerCase()
+                 let filteredTokens = []
+                 for(let i=0; i<csvPreview.allRows.length; i++) {
+                     const row = csvPreview.allRows[i]
+                     if (!searchLower || row.some(cell => cell.toLowerCase().includes(searchLower))) {
+                         filteredTokens.push({ originalIndex: i + 1, row })
+                     }
+                 }
+                 
+                 // 2. Paginate (15 per page)
+                 const rowsPerPage = 15
+                 const totalPages = Math.ceil(filteredTokens.length / rowsPerPage)
+                 const currentPage = Math.min(previewPage, Math.max(0, totalPages - 1))
+                 
+                 const startIndex = currentPage * rowsPerPage
+                 const paginatedRows = filteredTokens.slice(startIndex, startIndex + rowsPerPage)
+                 const isSearching = previewSearch.trim() !== ''
+
+                 return (
+                 <div className="flex-[2_2_0%] border border-gray-200 rounded-md bg-gray-50 overflow-hidden flex flex-col">
+                     <div className="bg-gray-100 px-3 py-2 border-b border-gray-200 flex flex-col gap-2">
+                         <div className="flex justify-between items-center text-xs font-semibold text-gray-700">
+                             <span>Live Data Preview</span>
+                             <span className="font-normal text-gray-500">
+                                {isSearching ? `Found ${filteredTokens.length} matches` : `Total ${csvPreview.total} rows`}
+                             </span>
+                         </div>
+                         <div className="flex gap-2">
+                             <input 
+                                type="text"
+                                placeholder="Search by name, value, etc..."
+                                value={previewSearch}
+                                onChange={e => { setPreviewSearch(e.target.value); setPreviewPage(0); }}
+                                className="w-full border border-gray-300 rounded px-2 py-1 text-xs"
+                             />
+                         </div>
+                     </div>
+                     <div className="max-h-[180px] overflow-auto flex-1 bg-white">
+                         <table className="w-full text-left text-xs whitespace-nowrap">
+                             <thead className="bg-white sticky top-0 shadow-[0_1px_2px_rgba(0,0,0,0.05)] z-10">
+                                 <tr>
+                                     <th className="px-3 py-2 text-gray-400 font-normal border-b border-gray-100">#</th>
+                                     {csvPreview.headers.map((h, i) => (
+                                         <th key={i} className="px-3 py-2 font-semibold text-gray-600 border-b border-gray-100">{h}</th>
+                                     ))}
+                                 </tr>
+                             </thead>
+                             <tbody className="divide-y divide-gray-50">
+                                 {paginatedRows.length === 0 ? (
+                                    <tr><td colSpan={csvPreview.headers.length + 1} className="p-4 text-center text-gray-400 italic">No matching rows</td></tr>
+                                 ) : (
+                                     paginatedRows.map((item, i) => {
+                                         const rowNum = item.originalIndex;
+                                         const isSelected = rowNum.toString() === applicantId;
+                                         return (
+                                             <tr 
+                                                key={i} 
+                                                onClick={() => setApplicantId(rowNum.toString())}
+                                                className={`cursor-pointer transition-colors ${isSelected ? 'bg-blue-50/80 hover:bg-blue-100/80' : 'hover:bg-gray-50 bg-white'}`}
+                                             >
+                                                 <td className={`px-3 py-1.5 font-medium ${isSelected ? 'text-blue-600 border-l-2 border-blue-500' : 'text-gray-400 border-l-2 border-transparent'}`}>{rowNum}</td>
+                                                 {item.row.map((cell, j) => (
+                                                     <td key={j} className={`px-3 py-1.5 truncate max-w-[120px] ${isSelected ? 'text-blue-800' : 'text-gray-600'}`} title={cell}>
+                                                         {cell}
+                                                     </td>
+                                                 ))}
+                                             </tr>
+                                         )
+                                     })
+                                 )}
+                             </tbody>
+                         </table>
+                     </div>
+                     {totalPages > 1 && (
+                         <div className="bg-gray-50 px-3 py-2 border-t border-gray-200 flex justify-between items-center text-xs">
+                             <button type="button" onClick={() => setPreviewPage(p => Math.max(0, p - 1))} disabled={currentPage === 0} className="px-2 py-1 text-gray-600 hover:text-gray-900 disabled:text-gray-300">
+                                 &larr; Prev
+                             </button>
+                             <span className="text-gray-500">Page {currentPage + 1} of {totalPages}</span>
+                             <button type="button" onClick={() => setPreviewPage(p => Math.min(totalPages - 1, p + 1))} disabled={currentPage >= totalPages - 1} className="px-2 py-1 text-gray-600 hover:text-gray-900 disabled:text-gray-300">
+                                 Next &rarr;
+                             </button>
+                         </div>
+                     )}
+                 </div>
+                 )
+             })()}
           </div>
 
           {error && <div className="text-red-600 text-sm">{error}</div>}

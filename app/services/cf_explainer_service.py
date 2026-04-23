@@ -74,11 +74,18 @@ def _encode_instance(
     instance: Dict[str, Any],
     feature_cols: List[str],
     encode_maps: Dict[str, Dict],
+    df_train: pd.DataFrame,
 ) -> Dict[str, Any]:
     """Encode a single instance dict using pre-fitted maps. Missing keys → 0."""
+    from app.utils.data_utils import translate_value_to_numeric
     row: Dict[str, Any] = {}
     for col in feature_cols:
         val = instance.get(col, 0)
+        
+        # Try to translate string inputs (like 'male') to numeric if needed
+        if col in df_train.columns:
+            val = translate_value_to_numeric(val, df_train[col])
+            
         if col in encode_maps:
             row[col] = encode_maps[col].get(str(val), -1)
         else:
@@ -173,7 +180,13 @@ class CFExplainerService:
             On missing target column or invalid instance JSON.
         """
         # ── Load & validate ─────────────────────────────────────────────
+        from app.utils.data_utils import normalize_dataframe_headers, normalize_string, normalize_dictionary_keys
         df = pd.read_csv(io.BytesIO(raw_bytes))
+        df = normalize_dataframe_headers(df)
+        
+        # Normalize target column name
+        target_column = normalize_string(target_column)
+
         if target_column not in df.columns:
             raise ValueError(
                 f"Target column '{target_column}' not found in CSV. "
@@ -189,6 +202,8 @@ class CFExplainerService:
             instance_dict: Dict[str, Any] = json.loads(instance_raw)
             if not isinstance(instance_dict, dict):
                 raise ValueError
+            # Clean up applicant column names
+            instance_dict = normalize_dictionary_keys(instance_dict)
         except (json.JSONDecodeError, ValueError):
             raise ValueError(
                 "instance must be a valid JSON object, "
@@ -202,18 +217,34 @@ class CFExplainerService:
         X_enc, encode_maps, decode_maps = _encode_df(X_raw)
         y_enc = y.copy()
 
+        # If target is continuous numeric (too many unique values), auto-bin it
+        if pd.api.types.is_numeric_dtype(y_enc) and y_enc.nunique() > 5:
+            median_val = y_enc.median()
+            y_enc = (y_enc > median_val).astype(int)
+            print(f"[CFExplainer] Auto-binned continuous target '{target_column}' at median {median_val}")
+            
+        # If target is non-numeric (e.g. 'Yes'/'No'), label-encode it to 0/1
+        elif not pd.api.types.is_numeric_dtype(y_enc):
+            unique_labels = sorted(y_enc.dropna().unique(), key=str)
+            _target_label_map = {lbl: i for i, lbl in enumerate(unique_labels)}
+            y_enc = y_enc.map(_target_label_map)
+            print(f"[CFExplainer] Label-encoded target '{target_column}': {_target_label_map}")
+
+        y_enc = y_enc.astype(int)
+
         # ── Train RF ────────────────────────────────────────────────────
         model = RandomForestClassifier(**_RF_PARAMS)
         model.fit(X_enc, y_enc)
 
-        inst_enc = _encode_instance(instance_dict, feature_cols, encode_maps)
+        inst_enc = _encode_instance(instance_dict, feature_cols, encode_maps, df)
         inst_df = pd.DataFrame([inst_enc])
         # Coerce dtypes to match training data exactly to prevent DiCE crash
         for col in feature_cols:
             if col in X_enc.columns:
                 inst_df[col] = inst_df[col].astype(X_enc[col].dtype)
-                
+
         original_pred = int(model.predict(inst_df)[0])
+
 
         # ── DiCE setup ──────────────────────────────────────────────────
         import dice_ml

@@ -63,17 +63,11 @@ def _gap_analysis(group_metrics: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
 class PerformanceService:
     def analyze(self, raw_bytes: bytes, protected_columns: List[str]) -> Dict[str, Any]:
         """
-        Read a CSV from *raw_bytes*, validate required columns, then compute
-        per-group performance metrics for each protected column.
-
-        Required CSV columns
-        --------------------
-        - ``prediction``   : model output label
-        - ``ground_truth`` : actual label
-
-        Returns a structured dict ready for JSON serialisation.
+        Read a CSV from *raw_bytes*, normalize columns, validate, and compute metrics.
         """
+        from app.utils.data_utils import normalize_dataframe_headers, normalize_string
         df = pd.read_csv(io.BytesIO(raw_bytes))
+        df = normalize_dataframe_headers(df)
 
         # --- validate required columns
         missing_required = _REQUIRED_COLS - set(df.columns)
@@ -83,8 +77,45 @@ class PerformanceService:
                 "The file must contain 'prediction' and 'ground_truth' columns."
             )
 
-        present_cols = [c for c in protected_columns if c in df.columns]
-        missing_cols = [c for c in protected_columns if c not in df.columns]
+        # ── Flexible Column Lookup ──────────────────────────────────────
+        # Find headers even if they were renamed (e.g. sex -> gender)
+        present_cols = []
+        missing_cols = []
+        available_cols = set(df.columns)
+        
+        mappings_map = {
+            "gender": ["sex", "m_f", "gender"],
+            "age": ["dob", "birth", "age"],
+            "race": ["ethnicity", "race"]
+        }
+
+        for requested in protected_columns:
+            norm_requested = normalize_string(requested)
+            found = False
+            
+            # 1. Exact match
+            if norm_requested in available_cols:
+                present_cols.append(norm_requested)
+                found = True
+            
+            # 2. Synonym match
+            if not found:
+                for std, synonyms in mappings_map.items():
+                    if norm_requested in synonyms and std in available_cols:
+                        present_cols.append(std)
+                        found = True
+                        break
+            
+            # 3. Substring match
+            if not found:
+                for col in available_cols:
+                    if norm_requested in col:
+                        present_cols.append(col)
+                        found = True
+                        break
+            
+            if not found:
+                missing_cols.append(requested)
 
         overall_metrics = _safe_metrics(df["ground_truth"], df["prediction"])
 

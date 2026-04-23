@@ -107,14 +107,14 @@ const SHAPBarRow: React.FC<{ feat: SHAPFeature; maxAbsShap: number; proxySet: Se
 const SHAPSection: React.FC<{ top_features: SHAPFeature[]; proxy_flags: string[] }> = ({ top_features, proxy_flags }) => {
   if (!top_features?.length) return null
   const proxySet = new Set(proxy_flags ?? [])
-  const maxAbsShap = Math.max(...top_features.map((f) => Math.abs(f.shap_value)))
+  const maxAbsShap = Math.max(...top_features.map((f: SHAPFeature) => Math.abs(f.shap_value)))
 
   return (
     <div>
       <SectionHeading title="Feature Impact" subtitle="How each feature moved the model's decision — measured by SHAP value." />
       <SHAPLegend />
       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
-        {top_features.map((feat) => <SHAPBarRow key={feat.feature} feat={feat} maxAbsShap={maxAbsShap} proxySet={proxySet} />)}
+        {top_features.map((feat: SHAPFeature) => <SHAPBarRow key={feat.feature} feat={feat} maxAbsShap={maxAbsShap} proxySet={proxySet} />)}
       </div>
       {proxy_flags?.length > 0 && (
         <div className="mt-3 flex gap-2 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
@@ -139,7 +139,7 @@ const CounterfactualsSection: React.FC<{ counterfactuals: string[]; decision: 'A
         subtitle={decision === 'APPROVED' ? "Minimal hypothetical changes that would flip the outcome to REJECTED." : "Minimal hypothetical changes that would flip the outcome to APPROVED."}
       />
       <ol className="flex flex-col gap-3">
-        {counterfactuals.map((cf, i) => (
+        {counterfactuals.map((cf: string, i: number) => (
           <li key={i} className="flex items-start gap-3 px-4 py-3.5 bg-white border border-gray-200 rounded-lg">
             <span className="flex-shrink-0 flex items-center justify-center w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-xs font-bold mt-0.5">{i + 1}</span>
             <span className="text-sm text-gray-800 leading-relaxed">{cf}</span>

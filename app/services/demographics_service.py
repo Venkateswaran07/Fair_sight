@@ -35,10 +35,15 @@ class DemographicsService:
           }
         }
         """
+        from app.utils.data_utils import normalize_dataframe_headers, normalize_string
         df = pd.read_csv(io.BytesIO(raw_bytes))
+        df = normalize_dataframe_headers(df)
 
-        present_cols = [c for c in protected_columns if c in df.columns]
-        missing_cols = [c for c in protected_columns if c not in df.columns]
+        # Normalize requested column names
+        norm_protected_cols = [normalize_string(c) for c in protected_columns]
+
+        present_cols = [c for c in norm_protected_cols if c in df.columns]
+        missing_cols = [c for c in norm_protected_cols if c not in df.columns]
 
         results: Dict[str, Any] = {}
 

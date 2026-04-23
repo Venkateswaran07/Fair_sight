@@ -15,12 +15,21 @@ class AuditService:
     # ------------------------------------------------------------------
     # Dataset management
     # ------------------------------------------------------------------
-    def store_dataset(self, raw_bytes: bytes, filename: str) -> str:
-        """Parse CSV bytes, store in memory, return a unique session ID."""
+    def store_dataset(self, raw_bytes: bytes, filename: str) -> Dict[str, Any]:
+        """Parse CSV bytes, perform smart mapping, store in memory."""
+        from app.utils.data_utils import normalize_dataframe_headers
         df = pd.read_csv(io.BytesIO(raw_bytes))
+        df = normalize_dataframe_headers(df) # Auto-rename columns
         session_id = str(uuid.uuid4())
         _sessions[session_id] = df
-        return session_id
+        
+        # Return summary info for the UI preview
+        return {
+            "session_id": session_id,
+            "headers": list(df.columns),
+            "preview_rows": df.head(15).values.tolist(),
+            "total_rows": len(df)
+        }
 
     def get_dataset(self, session_id: str) -> pd.DataFrame:
         if session_id not in _sessions:
@@ -33,27 +42,34 @@ class AuditService:
     def run_audit(self, request) -> Dict[str, Any]:
         """
         Run AIF360 fairness metrics on the stored dataset.
-        Returns a dict with disparate impact, statistical parity difference,
-        equal opportunity difference, and average odds difference.
         """
         from aif360.datasets import BinaryLabelDataset  # type: ignore
-        from aif360.metrics import BinaryLabelDatasetMetric, ClassificationMetric  # type: ignore
+        from aif360.metrics import BinaryLabelDatasetMetric  # type: ignore
+        from app.utils.data_utils import normalize_string
 
         df = self.get_dataset(request.session_id)
+        
+        # Normalize request parameters to match our smart-mapped columns
+        target_col = normalize_string(request.target_column)
+        protected_attrs = [normalize_string(attr) for attr in request.protected_attributes]
 
         # Build AIF360 BinaryLabelDataset
         bld = BinaryLabelDataset(
             df=df,
-            label_names=[request.target_column],
-            protected_attribute_names=request.protected_attributes,
+            label_names=[target_col],
+            protected_attribute_names=protected_attrs,
             favorable_label=request.favorable_label,
             unfavorable_label=request.unfavorable_label,
         )
 
+        # Normalize privileged/unprivileged groups as well
+        unprivileged = [{normalize_string(k): v for k, v in g.items()} for g in request.unprivileged_groups]
+        privileged = [{normalize_string(k): v for k, v in g.items()} for g in request.privileged_groups]
+
         metric = BinaryLabelDatasetMetric(
             bld,
-            unprivileged_groups=request.unprivileged_groups,
-            privileged_groups=request.privileged_groups,
+            unprivileged_groups=unprivileged,
+            privileged_groups=privileged,
         )
 
         results = {

@@ -1,0 +1,198 @@
+import re
+import pandas as pd
+
+def normalize_string(s: str) -> str:
+    """Clean up a single string to potentially match a standard name."""
+    clean = s.lower().strip()
+    clean = re.sub(r'\(.*?\)', '', clean).strip()
+    clean = clean.replace(' ', '_').replace('-', '_')
+    return clean
+
+def normalize_dataframe_headers(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Universally map varied column names to standard FairSight names.
+    Step 1: Fast regex/fuzzy matching.
+    Step 2: If critical columns are still missing, call Gemini AI for discovery.
+    """
+    new_columns = {}
+
+    # Mapping patterns
+    mappings = {
+        "ground_truth": [
+            r"ground[_ ]?truth", r"actual", r"label", r"target",
+            r"suitability", r"should[-_]hire", r"outcome", r"^y$"
+        ],
+        "prediction": [
+            r"prediction", r"pred", r"predicted", r"hired[-_]by[-_]expert",
+            r"decision", r"selection", r"output", r"score"
+        ],
+        "gender": [r"gender", r"sex", r"m[_ ]?f"],
+        "age": [r"age", r"dob", r"year[_ ]?of[_ ]?birth", r"age[_ ]?group"],
+        "race": [r"race", r"ethnicity"],
+    }
+
+    current_cols = df.columns.tolist()
+
+    for col in current_cols:
+        clean_col = normalize_string(col)
+        found_mapped = False
+        for standard_name, patterns in mappings.items():
+            for pattern in patterns:
+                if re.search(pattern, clean_col) or re.search(pattern, col.lower()):
+                    if standard_name not in new_columns.values():
+                        new_columns[col] = standard_name
+                        found_mapped = True
+                        break
+            if found_mapped:
+                break
+        if not found_mapped:
+            new_columns[col] = clean_col
+
+    df = df.rename(columns=new_columns)
+
+    # ── AI Fallback ─────────────────────────────────────────────────────────
+    # If critical columns are still missing, ask Gemini to identify them
+    critical = {"ground_truth", "prediction"}
+    if not critical.issubset(set(df.columns)):
+        try:
+            from app.services.discovery_service import ai_discover_column_mapping
+            # Run on ORIGINAL df (before rename) so Gemini sees original names
+            original_df = df.rename(columns={v: k for k, v in new_columns.items()})
+            ai_mapping = ai_discover_column_mapping(original_df)
+            if ai_mapping:
+                print(f"[SmartMapper] AI discovered column mapping: {ai_mapping}")
+                df = df.rename(columns={
+                    # Map from existing (possibly cleaned) name to standard
+                    new_columns.get(orig, normalize_string(orig)): std
+                    for orig, std in ai_mapping.items()
+                })
+        except Exception as e:
+            print(f"[SmartMapper] AI fallback error: {e}")
+
+    # ── Last-Resort Auto-Detection ───────────────────────────────────────────
+    # If still missing critical columns, scan for binary columns and
+    # promote the most likely one to ground_truth/prediction.
+    # This works even when Gemini is unavailable (rate limit, no API key, etc.)
+    cols = set(df.columns)
+    if "ground_truth" not in cols or "prediction" not in cols:
+        _auto_detect_outcome(df)
+        cols = set(df.columns)
+
+    # If we found ground_truth but not prediction, copy it
+    if "ground_truth" in cols and "prediction" not in cols:
+        df["prediction"] = df["ground_truth"]
+        print("[SmartMapper] No 'prediction' column found — using 'ground_truth' as prediction.")
+
+    # ── Drop Useless Identifiers ─────────────────────────────────────────────
+    # High-cardinality string columns (like Address, Employee ID, Name) cause
+    # memory explosions and crashes during ML model training. Let's auto-drop them.
+    df = _drop_identifier_columns(df)
+
+    return df
+
+
+def _drop_identifier_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove columns that are purely unique string identifiers (Names, Addresses, IDs).
+    A column is dropped if it's a string type and >90% of its values are unique.
+    Exception: If it's the target 'ground_truth' or 'prediction', keep it.
+    """
+    cols_to_drop = []
+    n_rows = len(df)
+    if n_rows == 0:
+        return df
+
+    for col in df.columns:
+        if col in ("ground_truth", "prediction"):
+            continue
+            
+        # Only drop string/object columns (numeric IDs are mostly harmless, but strings break OHE)
+        if df[col].dtype == 'object' or pd.api.types.is_string_dtype(df[col]):
+            unique_count = df[col].nunique()
+            if unique_count / n_rows > 0.90:  # > 90% unique
+                cols_to_drop.append(col)
+
+    if cols_to_drop:
+        print(f"[SmartMapper] Dropping highly-unique string columns (likely IDs/Addresses): {cols_to_drop}")
+        df = df.drop(columns=cols_to_drop)
+        
+    return df
+
+
+
+def _auto_detect_outcome(df: pd.DataFrame) -> None:
+    """
+    Scan DataFrame columns for binary-valued columns (Yes/No, 0/1, True/False).
+    Promote the best candidate to 'ground_truth' and 'prediction' in-place.
+    Prefers columns whose name sounds like an outcome (hired, selected, approved, etc.).
+    """
+    binary_candidates = []
+    outcome_keywords = ["attrition", "hired", "selected", "approved", "rejected",
+                        "outcome", "result", "target", "label", "status", "decision",
+                        "churn", "default", "fraud", "leave", "left"]
+
+    for col in df.columns:
+        if col in ("ground_truth", "prediction"):
+            continue
+        series = df[col].dropna()
+        unique = series.unique()
+        if len(unique) == 2:
+            # Score by how "outcome-like" the name is
+            name_lower = col.lower()
+            score = sum(1 for kw in outcome_keywords if kw in name_lower)
+            binary_candidates.append((score, col))
+
+    if not binary_candidates:
+        print("[SmartMapper] Could not auto-detect any binary outcome column.")
+        return
+
+    # Pick the highest-scoring candidate (most outcome-like name)
+    binary_candidates.sort(key=lambda x: -x[0])
+    best_col = binary_candidates[0][1]
+
+    if "ground_truth" not in df.columns:
+        df["ground_truth"] = df[best_col]
+        print(f"[SmartMapper] Auto-detected '{best_col}' as ground_truth.")
+
+    if "prediction" not in df.columns:
+        df["prediction"] = df["ground_truth"]
+        print(f"[SmartMapper] Using '{best_col}' as prediction (no separate prediction column found).")
+
+
+def normalize_dictionary_keys(d: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize keys in a dictionary to match standard naming conventions."""
+    return {normalize_string(k): v for k, v in d.items()}
+
+def translate_value_to_numeric(val: Any, target_series: pd.Series) -> Any:
+    """
+    Attempt to translate a string value (like 'male' or 'yes') 
+    to match the numeric type or encoding of the target series.
+    Also scrubs messy quotes and whitespace.
+    """
+    if not isinstance(val, str):
+        return val
+        
+    # Scrub messy quotes and whitespace (handles strings like '" 10"' -> '10')
+    clean_val = val.strip().strip('"').strip("'").strip()
+    
+    if not pd.api.types.is_numeric_dtype(target_series):
+        return clean_val
+    
+    lookup_val = clean_val.lower()
+    
+    # Common boolean/binary mappings
+    boolean_map = {
+        "male": 1, "m": 1, "man": 1,
+        "female": 0, "f": 0, "woman": 0,
+        "yes": 1, "y": 1, "true": 1, "approved": 1,
+        "no": 0, "n": 0, "false": 0, "rejected": 0
+    }
+    
+    if lookup_val in boolean_map:
+        return boolean_map[lookup_val]
+        
+    try:
+        # Final attempt to force it to a number
+        return float(clean_val)
+    except (ValueError, TypeError):
+        return clean_val

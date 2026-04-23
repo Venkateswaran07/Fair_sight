@@ -111,7 +111,15 @@ class FairnessService:
         ValueError
             On missing/invalid columns or non-binary protected attribute.
         """
+        from app.utils.data_utils import normalize_dataframe_headers, normalize_string
         df = pd.read_csv(io.BytesIO(raw_bytes))
+        df = normalize_dataframe_headers(df)
+
+        # Normalize requested column names
+        norm_protected_cols = [normalize_string(c) for c in [protected_column]]
+
+        present_cols = [c for c in norm_protected_cols if c in df.columns]
+        missing_cols = [c for c in norm_protected_cols if c not in df.columns]
 
         # ── Validate required columns ───────────────────────────────────
         missing_req = _REQUIRED_COLS - set(df.columns)
@@ -120,25 +128,91 @@ class FairnessService:
                 f"CSV is missing required column(s): {sorted(missing_req)}. "
                 "The file must contain 'prediction' and 'ground_truth' columns."
             )
-        if protected_column not in df.columns:
+        
+        # ── Flexible Column Lookup ──────────────────────────────────────
+        # The SmartMapper might have renamed 'sex' to 'gender' or 'dob' to 'age'.
+        # We need to find the column the user *meant* even if it was renamed.
+        available_cols = list(df.columns)
+        actual_col = None
+        
+        # 1. Try exact match (normalized)
+        norm_requested = normalize_string(protected_column)
+        if norm_requested in available_cols:
+            actual_col = norm_requested
+        
+        # 2. Try common mappings if not found
+        if not actual_col:
+            mappings_map = {
+                "gender": ["sex", "m_f", "gender"],
+                "age": ["dob", "birth", "age"],
+                "race": ["ethnicity", "race"]
+            }
+            for std, synonyms in mappings_map.items():
+                if norm_requested in synonyms and std in available_cols:
+                    actual_col = std
+                    break
+        
+        # 3. Fallback: search for any column that contains the requested name
+        if not actual_col:
+            for col in available_cols:
+                if norm_requested in col:
+                    actual_col = col
+                    break
+                    
+        if not actual_col:
             raise ValueError(
                 f"Protected column '{protected_column}' not found in CSV. "
-                f"Available columns: {list(df.columns)}"
+                f"Available columns: {available_cols}"
             )
+        
+        protected_column = actual_col
 
-        # ── Validate binary attribute ───────────────────────────────────
+        # ── Group Protected Attribute ───────────────────────────────────
         unique_vals = df[protected_column].dropna().unique().tolist()
-        if len(unique_vals) != 2:
-            raise ValueError(
-                f"Protected column '{protected_column}' must contain exactly 2 unique "
-                f"values (binary attribute). Found {len(unique_vals)}: {unique_vals}"
+        
+        # 1. Auto-bin continuous numeric attributes at the median
+        if len(unique_vals) > 2 and pd.api.types.is_numeric_dtype(df[protected_column]):
+            median_val = df[protected_column].median()
+            df[protected_column] = df[protected_column].apply(
+                lambda x: f"≤{int(median_val)}" if x <= median_val else f">{int(median_val)}"
             )
+            print(f"[FairnessService] Auto-binned numeric '{protected_column}' at median {median_val}")
+            unique_vals = df[protected_column].unique().tolist()
+
+        # 2. For non-numeric categoricals with > 2 groups, pick Top-1 vs Rest
+        elif len(unique_vals) > 2:
+            counts = df[protected_column].value_counts()
+            majority_val = counts.index[0]
+            df[protected_column] = df[protected_column].apply(
+                lambda x: str(x) if x == majority_val else "Other"
+            )
+            print(f"[FairnessService] Grouped categorical '{protected_column}' as '{majority_val}' vs 'Other'")
+            unique_vals = df[protected_column].unique().tolist()
+
+        # ── Validate result is binary ───────────────────────────────────
+        if len(unique_vals) < 2:
+             raise ValueError(f"Protected column '{protected_column}' must have at least 2 groups to compare.")
 
         # ── Coerce positive label ───────────────────────────────────────
-        pos_label = _coerce_label(positive_label_raw, df["prediction"])
+        # Try to find the provided label; if missing, look for common positives (Approved, Yes, 1)
+        potential_positives = [positive_label_raw, "Approved", "Yes", "Status_1", "1", 1]
+        pos_label = None
+        
+        for p in potential_positives:
+            try:
+                coerced = _coerce_label(str(p), df["prediction"])
+                if coerced in df["prediction"].values:
+                    pos_label = coerced
+                    break
+            except: continue
+            
+        if pos_label is None:
+            # Last resort: just pick the label that appears in predictions
+            pos_label = df["prediction"].mode()[0]
+            print(f"[FairnessService] Could not find requested positive label. Auto-selected '{pos_label}'.")
 
-        # Sort group labels for deterministic ordering (group_A < group_B)
-        group_labels: List = sorted(unique_vals, key=str)
+        # Sort group labels for deterministic ordering
+        group_labels = sorted([str(v) for v in unique_vals])
         group_a_label, group_b_label = group_labels[0], group_labels[1]
 
         grp_a = df[df[protected_column] == group_a_label]

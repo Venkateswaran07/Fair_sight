@@ -95,29 +95,44 @@ COUNTERFACTUAL SCENARIOS (what would change the outcome to APPROVED):
 
     if audience == "hr_manager":
         instruction = (
-            "Explain this decision in 2-3 plain sentences for an HR manager. "
-            "Do not use technical terms like SHAP, correlation, or machine learning. "
-            "If proxy concerns are present, mention them simply (e.g. 'ZIP code may be "
-            "a stand-in for race'). Keep it empathetic and actionable."
+            "Explain this decision in a brief, friendly paragraph for an HR manager. "
+            "Focus on being clear and helpful. Avoid all technical jargon. "
+            "If proxy concerns are present, mention them simply. "
+            "Crucially: Ensure the explanation is a complete thought and never ends mid-sentence."
         )
     elif audience == "developer":
         instruction = (
-            "Provide a technical explanation of this decision. Include the specific feature "
-            "names and their SHAP values, explain what proxy flags imply about model risk, "
-            "and describe what the counterfactuals reveal about the decision boundary. "
-            "Use precise ML terminology."
+            "Provide a thorough technical explanation. Include feature names, SHAP values, "
+            "and implications of any proxy flags. Ensure all technical points are fully concluded."
         )
     elif audience == "executive":
         instruction = (
-            "Write exactly two sentences only. "
-            "Sentence 1: a risk summary stating whether this decision carries fairness risk and why. "
-            "Sentence 2: a single recommended action the organisation should take. "
-            "Do not add any extra text, headings, or bullet points."
+            "Write a concise 2-sentence summary. Sentence 1: Risk level/status. "
+            "Sentence 2: Recommended action. Ensure both sentences are complete."
         )
     else:
-        instruction = "Explain this decision in plain language."
+        instruction = "Explain this decision in plain language. Ensure you finish your sentences."
 
     return f"{context}\n\n---\n{instruction}"
+
+def _fallback_explanation(decision: str, top_features: list, proxy_flags: list) -> str:
+    """Plain-English summary built from SHAP data — used when Gemini quota is exceeded."""
+    verdict = "approved" if "APPROV" in decision.upper() else "not selected"
+    lines = [f"This candidate was {verdict} by the model."]
+    if top_features:
+        top = top_features[0]
+        direction = "positively" if top.get("shap_value", 0) >= 0 else "negatively"
+        lines.append(
+            f"The most influential factor was '{top['feature']}', "
+            f"which {direction} impacted the decision "
+            f"({top.get('contribution_percent', 0):.1f}% of total influence)."
+        )
+    if proxy_flags:
+        lines.append(
+            f"Note: the following features may act as proxies for protected attributes "
+            f"and should be reviewed: {', '.join(proxy_flags)}."
+        )
+    return " ".join(lines)
 
 
 # ── Service ────────────────────────────────────────────────────────────────
@@ -127,14 +142,12 @@ class GeminiExplainService:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise EnvironmentError(
-                "GEMINI_API_KEY environment variable is not set. "
-                "Set it before starting the server: "
-                "  Windows: set GEMINI_API_KEY=your_key_here\n"
-                "  Linux/Mac: export GEMINI_API_KEY=your_key_here"
+                "GEMINI_API_KEY environment variable is not set."
             )
         
         genai.configure(api_key=api_key)
-        self._model_name = os.getenv("GEMINI_MODEL", _DEFAULT_MODEL)
+        # Reverting to the user's preferred model that worked before
+        self._model_name = "gemini-2.5-flash"
 
     def explain(
         self,
@@ -144,41 +157,25 @@ class GeminiExplainService:
         counterfactuals: List[str],
         audience: str,
     ) -> str:
-        """
-        Call the Google Gemini LLM and return the explanation text.
-
-        Parameters
-        ----------
-        decision        : "APPROVED" or "REJECTED"
-        top_features    : list of {feature, shap_value, contribution_percent}
-        proxy_flags     : list of feature names flagged as proxies
-        counterfactuals : list of plain counterfactual strings
-        audience        : "hr_manager" | "developer" | "executive"
-
-        Returns
-        -------
-        str  — the model's explanation text
-        """
         system_instruction = _system_prompt(audience)
         user = _user_prompt(decision, top_features, proxy_flags, counterfactuals, audience)
 
         combined_prompt = f"{system_instruction}\n\nTask:\n{user}"
 
-        # Use the modern Gemini 2.5 Flash model explicitly as shown in your AI Studio dashboard limits
-        model_name = "gemini-2.5-flash"
-        model = genai.GenerativeModel(model_name)
-        
-        # Generation config
+        model = genai.GenerativeModel(self._model_name)
         generation_config = genai.types.GenerationConfig(
-            temperature=0.4,
-            max_output_tokens=1024,
+            temperature=0.7,
+            max_output_tokens=2048,  # Increased so explanations never truncate
         )
-
-        response = model.generate_content(
-            combined_prompt,
-            generation_config=generation_config
-        )
-
-        if response.text:
-            return response.text.strip()
-        return "Explanation could not be generated."
+        try:
+            response = model.generate_content(
+                combined_prompt,
+                generation_config=generation_config
+            )
+            if response.text:
+                return response.text.strip()
+        except Exception as e:
+            print(f"GEMINI ERROR: {e}")
+            # Graceful fallback: build a plain summary from the data directly
+            return _fallback_explanation(decision, top_features, proxy_flags)
+        return _fallback_explanation(decision, top_features, proxy_flags)
