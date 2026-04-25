@@ -18,26 +18,40 @@ export default function ExplainPage() {
   const [previewPage, setPreviewPage] = useState(0)
   const [previewSearch, setPreviewSearch] = useState('')
 
-  // Auto-parse CSV file for preview
+  // Auto-parse CSV file for preview via backend Smart Mapper
   useEffect(() => {
     if (!datasetFile) {
         setCsvPreview(null)
         return
     }
-    const reader = new FileReader()
-    reader.onload = (e) => {
-        const text = e.target.result
-        const lines = text.split(/\r?\n/).filter(line => line.trim())
-        if (lines.length > 0) {
-            const headers = lines[0].split(',').map(s => s.trim())
-            // Store all rows for search/pagination
-            const allRows = lines.slice(1).map(line => line.split(',').map(s => s.trim()))
-            setCsvPreview({ headers, allRows, total: lines.length - 1 })
-            setPreviewPage(0)
-            setPreviewSearch('')
+    
+    const syncWithBackend = async () => {
+        const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+        const formData = new FormData()
+        formData.append('file', datasetFile)
+        try {
+            const res = await fetch(`${baseUrl}/audit/upload`, { method: 'POST', body: formData })
+            if (res.ok) {
+                const data = await res.json()
+                setCsvPreview({ 
+                    headers: data.headers, 
+                    allRows: data.preview_rows, 
+                    total: data.total_rows 
+                })
+            }
+        } catch (e) {
+            console.error("Failed to sync preview with backend", e)
+            // Fallback to local if backend is down
+            const text = await datasetFile.text()
+            const lines = text.split(/\r?\n/).filter(line => line.trim())
+            if (lines.length > 0) {
+                const headers = lines[0].split(',').map(s => s.trim())
+                const allRows = lines.slice(1).map(line => line.split(',').map(s => s.trim()))
+                setCsvPreview({ headers, allRows, total: lines.length - 1 })
+            }
         }
     }
-    reader.readAsText(datasetFile)
+    syncWithBackend()
   }, [datasetFile])
 
   // States to pass to GlassBoxViewer
@@ -74,17 +88,27 @@ export default function ExplainPage() {
             
             const targetRow = lines[rowIndex].split(',')
             
+            // Keywords that indicate a column is an outcome/result (not a feature)
+            const outcomeKeywords = ['ground_truth', 'prediction', 'outcome', 'decision', 'label', 'target', 'status', 'bank_loan'];
+            
             let extractedJson = {}
             targetRow.forEach((val, idx) => {
                 const header = headers[idx]
-                if (header !== targetColumn && header !== 'ground_truth') {
+                const cleanHeader = header.toLowerCase().replace(/[^a-z0-9]/g, '');
+                
+                // Only include as a feature if it's NOT the target and NOT an outcome column
+                const isTarget = header === targetColumn || cleanHeader === targetColumn.toLowerCase().replace(/[^a-z0-9]/g, '');
+                const isOutcome = outcomeKeywords.some(k => cleanHeader.includes(k));
+
+                if (!isTarget && !isOutcome) {
                     const num = Number(val)
                     extractedJson[header] = isNaN(num) ? val.trim() : num
                 }
             })
-            // Remove applicant_id or any 'id' columns to prevent them being used as features
+            
+            // Remove ID columns
             Object.keys(extractedJson).forEach(key => {
-                if (key.toLowerCase().includes('id') || key.toLowerCase() === 'no') {
+                if (key.toLowerCase().includes('id') || key.toLowerCase() === 'no' || key.toLowerCase() === '#') {
                     delete extractedJson[key]
                 }
             })
@@ -94,6 +118,8 @@ export default function ExplainPage() {
             throw new Error(`Failed to extract row data: ${e.message}`)
         }
 
+        const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
         // 1. Fetch SHAP Explain
         const formExplain = new FormData()
         formExplain.append('file', datasetFile)
@@ -101,7 +127,7 @@ export default function ExplainPage() {
         formExplain.append('instance', activeInstanceJson)
         formExplain.append('top_n', '5')
 
-        const resExplain = await fetch('http://localhost:8000/audit/explain', { method: 'POST', body: formExplain })
+        const resExplain = await fetch(`${baseUrl}/audit/explain`, { method: 'POST', body: formExplain })
         if (!resExplain.ok) throw new Error(await resExplain.text())
         const explainData = await resExplain.json()
 
@@ -115,7 +141,7 @@ export default function ExplainPage() {
         formProxy.append('file', datasetFile)
         formProxy.append('protected_columns', JSON.stringify(cols))
 
-        const resProxy = await fetch('http://localhost:8000/audit/proxies', { method: 'POST', body: formProxy })
+        const resProxy = await fetch(`${baseUrl}/audit/proxies`, { method: 'POST', body: formProxy })
         if (!resProxy.ok) throw new Error(await resProxy.text())
         const proxyData = await resProxy.json()
         const flags = proxyData.high_risk_features
@@ -129,7 +155,7 @@ export default function ExplainPage() {
         const desired = explainData.predicted_class == 1 ? 0 : 1
         formCF.append('desired_class', desired.toString())
 
-        const resCF = await fetch('http://localhost:8000/audit/counterfactual', { method: 'POST', body: formCF })
+        const resCF = await fetch(`${baseUrl}/audit/counterfactual`, { method: 'POST', body: formCF })
         const cfs = []
         if (resCF.ok) {
             const cfData = await resCF.json()
@@ -145,7 +171,7 @@ export default function ExplainPage() {
             audience: audience
         }
         
-        const resPlain = await fetch('http://localhost:8000/audit/explain-plain', {
+        const resPlain = await fetch(`${baseUrl}/audit/explain-plain`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(explainPlainPayload)

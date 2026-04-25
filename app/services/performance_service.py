@@ -72,9 +72,10 @@ class PerformanceService:
         # --- validate required columns
         missing_required = _REQUIRED_COLS - set(df.columns)
         if missing_required:
+            print(f"[PerformanceService] Missing columns! Required: {_REQUIRED_COLS}, Found: {list(df.columns)}")
             raise ValueError(
                 f"CSV is missing required column(s): {sorted(missing_required)}. "
-                "The file must contain 'prediction' and 'ground_truth' columns."
+                f"The file must contain 'prediction' and 'ground_truth' columns. Found: {list(df.columns)}"
             )
 
         # ── Flexible Column Lookup ──────────────────────────────────────

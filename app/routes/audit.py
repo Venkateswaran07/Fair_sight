@@ -19,8 +19,11 @@ import json
 from datetime import datetime, timezone
 from fastapi.responses import StreamingResponse
 
+import io
+import pandas as pd
 from fastapi import APIRouter, Form, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
+from app.utils.data_utils import normalize_dataframe_headers, normalize_column_list, normalize_string
 
 from app.models.audit_models import (
     AuditRequest,
@@ -88,14 +91,27 @@ def _get_gemini_svc() -> GeminiExplainService:
 async def upload_dataset(file: UploadFile = File(...)):
     """
     Upload a CSV dataset for auditing.
-    Returns a session ID used in subsequent audit calls.
     """
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files are accepted.")
+    try:
+        if not file.filename.endswith(".csv"):
+            raise HTTPException(status_code=400, detail="Only CSV files are accepted.")
 
-    contents = await file.read()
-    session_id = audit_svc.store_dataset(contents, file.filename)
-    return {"session_id": session_id, "filename": file.filename, "status": "uploaded"}
+        contents = await file.read()
+        result = audit_svc.store_dataset(contents, file.filename)
+        return {
+            "session_id": result["session_id"],
+            "filename": file.filename,
+            "status": "uploaded",
+            "headers": result["headers"],
+            "preview_rows": result["preview_rows"],
+            "total_rows": result["total_rows"]
+        }
+    except Exception as exc:
+        print(f"[Critical] Upload Error: {exc}")
+        return JSONResponse(
+            status_code=400, 
+            content={"error": "Failed to process CSV", "detail": str(exc)}
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +125,38 @@ async def analyze(request: AuditRequest):
     """
     result = audit_svc.run_audit(request)
     return JSONResponse(content=result)
+
+
+@router.get("/history")
+async def list_history():
+    """
+    Fetch the list of all past fairness audits from Firestore.
+    """
+    try:
+        history = audit_svc.get_history()
+        return {"total": len(history), "history": history}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch history: {exc}")
+
+
+@router.post("/history/save")
+async def save_history(record: dict):
+    """
+    Save a full audit result (fairness + performance + demographics) to history.
+    """
+    from app.db import db
+    from datetime import datetime, timezone
+    
+    try:
+        session_id = record.get("session_id") or f"audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        record["session_id"] = session_id
+        if "timestamp" not in record:
+            record["timestamp"] = datetime.now(timezone.utc).isoformat()
+            
+        db.collection("audit_history").document(session_id).set(record)
+        return {"status": "success", "session_id": session_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to save history: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -266,11 +314,12 @@ async def demographics(
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only CSV files are accepted.")
 
-    # --- parse protected_columns from JSON string
+    # --- parse and normalize protected_columns from JSON string
     try:
-        columns: list = json.loads(protected_columns)
-        if not isinstance(columns, list) or not all(isinstance(c, str) for c in columns):
+        raw_cols: list = json.loads(protected_columns)
+        if not isinstance(raw_cols, list) or not all(isinstance(c, str) for c in raw_cols):
             raise ValueError
+        columns = normalize_column_list(raw_cols)
     except (json.JSONDecodeError, ValueError):
         raise HTTPException(
             status_code=422,
@@ -325,9 +374,10 @@ async def performance(
         raise HTTPException(status_code=400, detail="Only CSV files are accepted.")
 
     try:
-        columns: list = json.loads(protected_columns)
-        if not isinstance(columns, list) or not all(isinstance(c, str) for c in columns):
+        raw_cols: list = json.loads(protected_columns)
+        if not isinstance(raw_cols, list) or not all(isinstance(c, str) for c in raw_cols):
             raise ValueError
+        columns = normalize_column_list(raw_cols)
     except (json.JSONDecodeError, ValueError):
         raise HTTPException(
             status_code=422,
@@ -395,7 +445,25 @@ async def fairness(
     raw = await file.read()
 
     try:
-        result = fairness_svc.analyze(raw, protected_column, positive_label)
+        prot_col = normalize_string(protected_column)
+        result = fairness_svc.analyze(raw, prot_col, positive_label)
+        
+        # Auto-save to history for the dashboard
+        from datetime import datetime, timezone
+        audit_entry = {
+            "session_id": f"audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "num_rows": len(pd.read_csv(io.BytesIO(raw))),
+            "protected_attributes": [protected_column],
+            "fairness_assessment": "Analyzed",
+            "metrics": {
+                "disparate_impact": result.get("disparate_impact", 0),
+                "statistical_parity_difference": result.get("statistical_parity_difference", 0)
+            }
+        }
+        from app.db import db
+        db.collection("audit_history").document(audit_entry["session_id"]).set(audit_entry)
+        
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -441,9 +509,10 @@ async def detect_proxies(
         raise HTTPException(status_code=400, detail="Only CSV files are accepted.")
 
     try:
-        columns: list = json.loads(protected_columns)
-        if not isinstance(columns, list) or not all(isinstance(c, str) for c in columns):
+        raw_cols: list = json.loads(protected_columns)
+        if not isinstance(raw_cols, list) or not all(isinstance(c, str) for c in raw_cols):
             raise ValueError
+        columns = normalize_column_list(raw_cols)
     except (json.JSONDecodeError, ValueError):
         raise HTTPException(
             status_code=422,

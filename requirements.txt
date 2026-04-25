@@ -5,9 +5,11 @@ scikit-learn
 shap
 aif360
 dice-ml
-google-generativeai
+google-genai
 pytest
 pytest-asyncio
 httpx
 python-multipart
 reportlab
+google-cloud-firestore
+google-cloud-aiplatform

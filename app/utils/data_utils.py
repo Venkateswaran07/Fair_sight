@@ -2,11 +2,20 @@ import re
 import pandas as pd
 
 def normalize_string(s: str) -> str:
-    """Clean up a single string to potentially match a standard name."""
+    """Clean up a single string to a standard, predictable format."""
+    # 1. Lowercase and remove all content inside parentheses
     clean = s.lower().strip()
-    clean = re.sub(r'\(.*?\)', '', clean).strip()
+    clean = re.sub(r'\(.*?\)', '', clean)
+    # 2. Remove any leftover parentheses or quotes
+    clean = re.sub(r'[()\'"]', '', clean)
+    # 3. Standardize whitespace and separators
     clean = clean.replace(' ', '_').replace('-', '_')
+    clean = re.sub(r'_+', '_', clean).strip('_')
     return clean
+
+def normalize_column_list(cols: list) -> list:
+    """Normalize a list of column names for matching."""
+    return [normalize_string(c) for c in cols]
 
 def normalize_dataframe_headers(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -16,15 +25,15 @@ def normalize_dataframe_headers(df: pd.DataFrame) -> pd.DataFrame:
     """
     new_columns = {}
 
-    # Mapping patterns
+    # Mapping patterns - strictly defined to avoid greedy matches
     mappings = {
         "ground_truth": [
-            r"ground[_ ]?truth", r"actual", r"label", r"target",
-            r"suitability", r"should[-_]hire", r"outcome", r"^y$"
+            r"^ground[_ ]?truth$", r"^actual$", r"^label$", r"^target$",
+            r"^suitability$", r"^should[-_]hire$", r"^outcome$", r"^y$"
         ],
         "prediction": [
-            r"prediction", r"pred", r"predicted", r"hired[-_]by[-_]expert",
-            r"decision", r"selection", r"output", r"score"
+            r"^prediction$", r"^pred$", r"^predicted$", r"^hired[-_]by[-_]expert$",
+            r"^decision$", r"^selection$", r"^output$", r"^prediction_output$"
         ],
         "gender": [r"gender", r"sex", r"m[_ ]?f"],
         "age": [r"age", r"dob", r"year[_ ]?of[_ ]?birth", r"age[_ ]?group"],
@@ -48,7 +57,19 @@ def normalize_dataframe_headers(df: pd.DataFrame) -> pd.DataFrame:
         if not found_mapped:
             new_columns[col] = clean_col
 
-    df = df.rename(columns=new_columns)
+    # ── Ensure Unique Column Names ──────────────────────────────────────────
+    final_columns = []
+    seen = {}
+    for col in current_cols:
+        candidate = new_columns.get(col, normalize_string(col))
+        if candidate in seen:
+            seen[candidate] += 1
+            final_columns.append(f"{candidate}_{seen[candidate]}")
+        else:
+            seen[candidate] = 0
+            final_columns.append(candidate)
+    
+    df.columns = final_columns
 
     # ── AI Fallback ─────────────────────────────────────────────────────────
     # If critical columns are still missing, ask Gemini to identify them
@@ -79,7 +100,7 @@ def normalize_dataframe_headers(df: pd.DataFrame) -> pd.DataFrame:
         cols = set(df.columns)
 
     # If we found ground_truth but not prediction, copy it
-    if "ground_truth" in cols and "prediction" not in cols:
+    if "ground_truth" in set(df.columns) and "prediction" not in set(df.columns):
         df["prediction"] = df["ground_truth"]
         print("[SmartMapper] No 'prediction' column found — using 'ground_truth' as prediction.")
 

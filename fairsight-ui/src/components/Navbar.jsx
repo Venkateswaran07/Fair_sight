@@ -10,19 +10,29 @@ export default function Navbar() {
         <Link to="/" className="flex items-center gap-2 font-semibold text-gray-900">
           {/* Simple geometric mark — no orbs, no gradients */}
           <span className="inline-block w-6 h-6 bg-accent rounded-sm" aria-hidden="true" />
-          FairSight
+          FairSight <span className="text-[10px] font-normal text-gray-400 ml-1">Powered by Vertex AI</span>
         </Link>
 
         {/* Nav items */}
         <nav className="flex items-center gap-6 text-sm text-gray-600">
+          <div className="flex items-center gap-1.5 text-[10px] bg-green-50 text-green-700 px-2 py-0.5 rounded border border-green-100">
+            <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></span>
+            Firestore DB Connected
+          </div>
           <Link
             to="/explain"
             className="hover:text-gray-900 transition-colors font-medium text-blue-700 hover:bg-blue-50 px-3 py-1.5 rounded"
           >
             Glass Box Demo
           </Link>
+          <Link
+            to="/audit-history"
+            className="hover:text-gray-900 transition-colors font-medium"
+          >
+            History
+          </Link>
           <a
-            href="http://localhost:8000/docs"
+            href={`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/docs`}
             target="_blank"
             rel="noreferrer"
             className="hover:text-gray-900 transition-colors"

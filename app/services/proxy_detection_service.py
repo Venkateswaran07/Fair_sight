@@ -45,6 +45,11 @@ def _to_numeric(series: pd.Series) -> pd.Series:
     """
     if pd.api.types.is_numeric_dtype(series):
         return series.fillna(0).astype(float)
+    
+    # Force to series if it's a single-column DataFrame
+    if isinstance(series, pd.DataFrame):
+        series = series.iloc[:, 0]
+        
     return series.astype("category").cat.codes.astype(float)
 
 

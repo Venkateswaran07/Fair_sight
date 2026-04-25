@@ -138,14 +138,20 @@ class InstanceExplainerService:
                 f"Available columns: {list(df.columns)}"
             )
 
-        feature_cols = [c for c in df.columns if c != target_column]
+        # ── Feature Selection (Prevent Leakage) ──────────────────────────
+        # Drop the target AND any other columns that look like outcomes
+        outcome_keywords = {"ground_truth", "prediction", "outcome", "decision", "label", "target", "status"}
+        feature_cols = [
+            c for c in df.columns 
+            if c != target_column and normalize_string(c) not in outcome_keywords
+        ]
+        
         if not feature_cols:
-            raise ValueError("No feature columns found after removing the target column.")
+            raise ValueError("No feature columns found after removing the target and outcome-like columns.")
 
         X_train = df[feature_cols].copy()
         
-        # ── Target Normalization ─────────────────────────────────────────
-        # Ensure y_train is strictly binary (0/1) to prevent SHAP memory explosion
+        # ── Target Normalization (Fix Flipping) ──────────────────────────
         _y = df[target_column].copy()
         
         # 1. Auto-bin continuous targets
@@ -154,12 +160,28 @@ class InstanceExplainerService:
             _y = (_y > median_val).astype(int)
             print(f"[InstanceExplainer] Auto-binned continuous target '{target_column}' at median {median_val}")
             
-        # 2. Label-encode string targets (e.g., 'Yes'/'No')
+        # 2. Smart-encode string targets (e.g., 'Yes'/'No', 'Approved'/'Rejected')
         elif not pd.api.types.is_numeric_dtype(_y):
-            unique_labels = sorted(_y.dropna().unique(), key=str)
-            label_map = {lbl: i for i, lbl in enumerate(unique_labels)}
-            _y = _y.map(label_map)
-            print(f"[InstanceExplainer] Label-encoded target '{target_column}': {label_map}")
+            unique_labels = [str(x).strip() for x in _y.dropna().unique()]
+            
+            # Detect positive label
+            pos_keywords = {"yes", "y", "approved", "hired", "true", "1", "pass", "success"}
+            pos_label = None
+            for lbl in unique_labels:
+                if lbl.lower() in pos_keywords:
+                    pos_label = lbl
+                    break
+            
+            if pos_label is not None:
+                # Map the detected positive label to 1, everything else to 0
+                _y = _y.apply(lambda x: 1 if str(x).strip() == pos_label else 0)
+                print(f"[InstanceExplainer] Smart-mapped '{pos_label}' to 1 (Positive) for column '{target_column}'")
+            else:
+                # Fallback to alphabetical if no keywords found
+                unique_labels.sort()
+                label_map = {lbl: i for i, lbl in enumerate(unique_labels)}
+                _y = _y.map(label_map)
+                print(f"[InstanceExplainer] Fallback label-encoding for '{target_column}': {label_map}")
 
         y_train = _y.astype(int)
 

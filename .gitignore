@@ -1,19 +1,27 @@
-# Environments
-.env
-.venv/
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.env
 
 # Node
-fairsight-ui/node_modules/
 node_modules/
+dist/
+.eslintcache
 
-# OS/System files
+# Sensitive Data
+service-account.json
+*.json
+!package.json
+!tsconfig.json
+!package-lock.json
+
+# OS
 .DS_Store
 Thumbs.db
 
-# Database and Logs
-*.sqlite
-*.db
-*.db-shm
-*.db-wal
-*.log
+# Docker
+.dockerignore

@@ -193,23 +193,34 @@ class FairnessService:
         if len(unique_vals) < 2:
              raise ValueError(f"Protected column '{protected_column}' must have at least 2 groups to compare.")
 
-        # ── Coerce positive label ───────────────────────────────────────
-        # Try to find the provided label; if missing, look for common positives (Approved, Yes, 1)
-        potential_positives = [positive_label_raw, "Approved", "Yes", "Status_1", "1", 1]
+        # ── Smart Positive Label Detection ──────────────────────────────────
+        # We look for common "positive" terms in the actual data
+        potential_positives = [positive_label_raw, "1", 1, "yes", "true", "approved", "hired", "selected", "success", "pass"]
         pos_label = None
         
+        # Get all unique values in the prediction column (as strings for easy comparison)
+        actual_values = [str(v).lower().strip() for v in df["prediction"].unique()]
+        
         for p in potential_positives:
-            try:
-                coerced = _coerce_label(str(p), df["prediction"])
-                if coerced in df["prediction"].values:
-                    pos_label = coerced
-                    break
-            except: continue
+            p_str = str(p).lower().strip()
+            if p_str in actual_values:
+                # Find the original value that matched
+                for orig_v in df["prediction"].unique():
+                    if str(orig_v).lower().strip() == p_str:
+                        pos_label = orig_v
+                        break
+            if pos_label is not None: break
             
         if pos_label is None:
-            # Last resort: just pick the label that appears in predictions
+            # Fallback: If we find a '1' or '0' but it wasn't in our list, or just pick the mode
             pos_label = df["prediction"].mode()[0]
-            print(f"[FairnessService] Could not find requested positive label. Auto-selected '{pos_label}'.")
+            if hasattr(pos_label, "item"):
+                pos_label = pos_label.item()
+            print(f"[FairnessService] Auto-selected mode '{pos_label}' as positive label.")
+        else:
+            if hasattr(pos_label, "item"):
+                pos_label = pos_label.item()
+            print(f"[FairnessService] Detected positive label: '{pos_label}'")
 
         # Sort group labels for deterministic ordering
         group_labels = sorted([str(v) for v in unique_vals])

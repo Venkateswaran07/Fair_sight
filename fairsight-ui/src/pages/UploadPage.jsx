@@ -47,10 +47,11 @@ export default function UploadPage() {
     // Immediate background upload to get AI-mapped headers
     const uploadToGetHeaders = async () => {
         setIsAnalyzingHeaders(true)
+        const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
         const formData = new FormData()
         formData.append('file', fileToPreview)
         try {
-            const res = await fetch('http://localhost:8000/audit/upload', { method: 'POST', body: formData })
+            const res = await fetch(`${baseUrl}/audit/upload`, { method: 'POST', body: formData })
             if (res.ok) {
                 const data = await res.json()
                 if (data && data.headers) {
@@ -134,8 +135,10 @@ export default function UploadPage() {
       formProxy.append('file', datasetFile)
       formProxy.append('protected_columns', JSON.stringify(cols))
 
+      const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
       const fetchApi = async (path, bodyData) => {
-        const res = await fetch(`http://localhost:8000${path}`, { method: 'POST', body: bodyData })
+        const res = await fetch(`${baseUrl}${path}`, { method: 'POST', body: bodyData })
         if (!res.ok) {
            const text = await res.text()
            throw new Error(`Error on ${path}: ${res.statusText} - ${text}`)
@@ -150,7 +153,27 @@ export default function UploadPage() {
         fetchApi('/audit/proxies', formProxy),
       ])
 
-      const fullResult = { demographics, performance, fairness, proxies }
+      const fullResult = { 
+        demographics, 
+        performance, 
+        fairness, 
+        proxies,
+        protected_attributes: cols,
+        fairness_assessment: (fairness.disparate_impact >= 0.8 && fairness.disparate_impact <= 1.25) ? "FAIR" : "BIASED",
+        metrics: fairness
+      }
+      
+      // Save to history automatically
+      try {
+        await fetch(`${baseUrl}/audit/history/save`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(fullResult)
+        })
+      } catch (saveErr) {
+        console.error("Failed to auto-save to history:", saveErr)
+      }
+
       setResult(fullResult)
     } catch (err) {
       setError(err.message || 'An unexpected error occurred.')
@@ -201,7 +224,9 @@ export default function UploadPage() {
       <main className="max-w-6xl mx-auto px-6 py-10">
         <div className="mb-8">
           <h1 className="text-2xl font-bold text-gray-900">Upload your data</h1>
-          <p className="mt-2 text-gray-600">Provide your dataset and predictions to audit for bias.</p>
+          <p className="mt-2 text-gray-600">
+            Analyze your model for bias using <strong>Vertex AI</strong>. All results are securely saved to <strong>Google Firestore</strong>.
+          </p>
         </div>
 
         <div className="flex flex-col lg:flex-row gap-10">

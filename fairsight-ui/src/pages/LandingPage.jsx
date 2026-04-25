@@ -205,7 +205,7 @@ export default function LandingPage() {
             n="3"
             title="Read the results in your language"
             body="Choose your audience — HR manager, developer, or executive — and FairSight
-                  generates a plain-language summary using Gemini 1.5 Flash model via Google AI Studio. Then export
+                  generates a plain-language summary using Gemini 2.5 Flash model via Vertex AI. Then export
                   a full PDF audit report."
           />
         </div>
@@ -219,7 +219,7 @@ export default function LandingPage() {
               { n: '9', label: 'audit endpoints' },
               { n: '3', label: 'fairness metrics (DPD, EOD, DIR)' },
               { n: 'SHAP', label: 'feature explanations' },
-              { n: 'Gemini 1.5 Flash', label: 'plain-language via Google AI' },
+              { n: 'Gemini 2.5 Flash', label: 'plain-language via Google Vertex AI' },
             ].map(({ n, label }) => (
               <div key={label}>
                 <p className="text-2xl font-bold text-gray-900">{n}</p>
@@ -238,9 +238,9 @@ export default function LandingPage() {
             FairSight · AI fairness auditing
           </p>
           <div className="flex gap-6 text-sm text-gray-500">
-            <a href="http://localhost:8000/docs" target="_blank" rel="noreferrer"
+            <a href={`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/docs`} target="_blank" rel="noreferrer"
               className="hover:text-gray-900 transition-colors">API Docs</a>
-            <a href="http://localhost:8000/health" target="_blank" rel="noreferrer"
+            <a href={`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/health`} target="_blank" rel="noreferrer"
               className="hover:text-gray-900 transition-colors">Health</a>
           </div>
         </div>

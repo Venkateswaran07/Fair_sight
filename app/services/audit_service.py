@@ -5,6 +5,7 @@ AuditService — fairness metrics via IBM AIF360.
 import io
 import uuid
 import pandas as pd
+from datetime import datetime, timezone
 from typing import Dict, Any
 
 # In-memory session store (replace with Redis / DB in production)
@@ -74,6 +75,7 @@ class AuditService:
 
         results = {
             "session_id": request.session_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "num_rows": len(df),
             "num_columns": len(df.columns),
             "protected_attributes": request.protected_attributes,
@@ -87,7 +89,18 @@ class AuditService:
             },
             "fairness_assessment": self._assess_fairness(metric.disparate_impact()),
         }
+
+        # Persist results to Firestore
+        from app.db import db
+        db.collection("audit_history").document(request.session_id).set(results)
+
         return results
+
+    def get_history(self) -> list:
+        """Fetch all audits from Firestore, sorted by timestamp descending."""
+        from app.db import db
+        docs = db.collection("audit_history").order_by("timestamp", direction="DESCENDING").stream()
+        return [doc.to_dict() for doc in docs]
 
     # ------------------------------------------------------------------
     # Helpers
