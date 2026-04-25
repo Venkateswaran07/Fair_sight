@@ -84,220 +84,108 @@ def _metric_block(value: float, threshold: float, flag_above: bool) -> Dict[str,
 # ── Service ────────────────────────────────────────────────────────────────
 
 class FairnessService:
-    def analyze(
-        self,
-        raw_bytes: bytes,
-        protected_column: str,
-        positive_label_raw: str = "1",
-    ) -> Dict[str, Any]:
-        """
-        Parameters
-        ----------
-        raw_bytes
-            Raw bytes of the uploaded CSV.
-        protected_column
-            Name of the column containing the binary protected attribute.
-        positive_label_raw
-            String form of the positive (favourable) class label.
-            Converted to match the actual column dtype automatically.
-
-        Returns
-        -------
-        dict
-            Full fairness audit result ready for JSON serialisation.
-
-        Raises
-        ------
-        ValueError
-            On missing/invalid columns or non-binary protected attribute.
-        """
-        from app.utils.data_utils import normalize_dataframe_headers, normalize_string
+    def analyze(self, raw_bytes: bytes, protected_column: str, positive_label_raw: str = "1") -> Dict[str, Any]:
+        from app.utils.data_utils import normalize_dataframe_headers
         df = pd.read_csv(io.BytesIO(raw_bytes))
         df = normalize_dataframe_headers(df)
+        return self.analyze_df(df, protected_column, positive_label_raw)
 
-        # Normalize requested column names
-        norm_protected_cols = [normalize_string(c) for c in [protected_column]]
-
-        present_cols = [c for c in norm_protected_cols if c in df.columns]
-        missing_cols = [c for c in norm_protected_cols if c not in df.columns]
-
-        # ── Validate required columns ───────────────────────────────────
+    def analyze_df(self, df: pd.DataFrame, protected_column: str, positive_label_raw: str = "1") -> Dict[str, Any]:
+        """Compute fairness metrics for a normalized DataFrame."""
+        from app.utils.data_utils import normalize_string
+        
+        # --- validate required columns
         missing_req = _REQUIRED_COLS - set(df.columns)
         if missing_req:
-            raise ValueError(
-                f"CSV is missing required column(s): {sorted(missing_req)}. "
-                "The file must contain 'prediction' and 'ground_truth' columns."
-            )
+            raise ValueError(f"Missing required columns: {sorted(missing_req)}")
         
-        # ── Flexible Column Lookup ──────────────────────────────────────
-        # The SmartMapper might have renamed 'sex' to 'gender' or 'dob' to 'age'.
-        # We need to find the column the user *meant* even if it was renamed.
         available_cols = list(df.columns)
         actual_col = None
-        
-        # 1. Try exact match (normalized)
         norm_requested = normalize_string(protected_column)
+        
         if norm_requested in available_cols:
             actual_col = norm_requested
-        
-        # 2. Try common mappings if not found
-        if not actual_col:
-            mappings_map = {
-                "gender": ["sex", "m_f", "gender"],
-                "age": ["dob", "birth", "age"],
-                "race": ["ethnicity", "race"]
-            }
-            for std, synonyms in mappings_map.items():
-                if norm_requested in synonyms and std in available_cols:
-                    actual_col = std
-                    break
-        
-        # 3. Fallback: search for any column that contains the requested name
-        if not actual_col:
+        else:
             for col in available_cols:
                 if norm_requested in col:
                     actual_col = col
                     break
-                    
+        
         if not actual_col:
-            raise ValueError(
-                f"Protected column '{protected_column}' not found in CSV. "
-                f"Available columns: {available_cols}"
-            )
+            raise ValueError(f"Protected column '{protected_column}' not found.")
         
         protected_column = actual_col
-
-        # ── Group Protected Attribute ───────────────────────────────────
         unique_vals = df[protected_column].dropna().unique().tolist()
         
-        # 1. Auto-bin continuous numeric attributes at the median
+        # Auto-binning if needed
         if len(unique_vals) > 2 and pd.api.types.is_numeric_dtype(df[protected_column]):
             median_val = df[protected_column].median()
-            df[protected_column] = df[protected_column].apply(
-                lambda x: f"≤{int(median_val)}" if x <= median_val else f">{int(median_val)}"
-            )
-            print(f"[FairnessService] Auto-binned numeric '{protected_column}' at median {median_val}")
+            df[protected_column] = df[protected_column].apply(lambda x: f"<= {median_val}" if x <= median_val else f"> {median_val}")
             unique_vals = df[protected_column].unique().tolist()
-
-        # 2. For non-numeric categoricals with > 2 groups, pick Top-1 vs Rest
         elif len(unique_vals) > 2:
-            counts = df[protected_column].value_counts()
-            majority_val = counts.index[0]
-            df[protected_column] = df[protected_column].apply(
-                lambda x: str(x) if x == majority_val else "Other"
-            )
-            print(f"[FairnessService] Grouped categorical '{protected_column}' as '{majority_val}' vs 'Other'")
+            majority_val = df[protected_column].value_counts().index[0]
+            df[protected_column] = df[protected_column].apply(lambda x: str(x) if x == majority_val else "Other")
             unique_vals = df[protected_column].unique().tolist()
 
-        # ── Validate result is binary ───────────────────────────────────
         if len(unique_vals) < 2:
-             raise ValueError(f"Protected column '{protected_column}' must have at least 2 groups to compare.")
+             raise ValueError(f"Protected column '{protected_column}' must have at least 2 groups.")
 
-        # ── Smart Positive Label Detection ──────────────────────────────────
-        # We look for common "positive" terms in the actual data
+        # Smart Positive Label Detection
         potential_positives = [positive_label_raw, "1", 1, "yes", "true", "approved", "hired", "selected", "success", "pass"]
         pos_label = None
-        
-        # Get all unique values in the prediction column (as strings for easy comparison)
         actual_values = [str(v).lower().strip() for v in df["prediction"].unique()]
         
         for p in potential_positives:
             p_str = str(p).lower().strip()
             if p_str in actual_values:
-                # Find the original value that matched
                 for orig_v in df["prediction"].unique():
                     if str(orig_v).lower().strip() == p_str:
                         pos_label = orig_v
                         break
             if pos_label is not None: break
-            
+        
         if pos_label is None:
-            # Fallback: If we find a '1' or '0' but it wasn't in our list, or just pick the mode
             pos_label = df["prediction"].mode()[0]
-            if hasattr(pos_label, "item"):
-                pos_label = pos_label.item()
-            print(f"[FairnessService] Auto-selected mode '{pos_label}' as positive label.")
-        else:
-            if hasattr(pos_label, "item"):
-                pos_label = pos_label.item()
-            print(f"[FairnessService] Detected positive label: '{pos_label}'")
 
-        # Sort group labels for deterministic ordering
         group_labels = sorted([str(v) for v in unique_vals])
         group_a_label, group_b_label = group_labels[0], group_labels[1]
 
         grp_a = df[df[protected_column] == group_a_label]
         grp_b = df[df[protected_column] == group_b_label]
 
-        # ── Per-group statistics ────────────────────────────────────────
         ar_a = _approval_rate(grp_a, pos_label)
         ar_b = _approval_rate(grp_b, pos_label)
         tpr_a = _tpr(grp_a, pos_label)
         tpr_b = _tpr(grp_b, pos_label)
 
-        group_stats: Dict[str, Any] = {
-            str(group_a_label): {
-                "count": len(grp_a),
-                "approval_rate": round(ar_a, 4),
-                "tpr": round(tpr_a, 4) if tpr_a is not None else None,
-            },
-            str(group_b_label): {
-                "count": len(grp_b),
-                "approval_rate": round(ar_b, 4),
-                "tpr": round(tpr_b, 4) if tpr_b is not None else None,
-            },
+        group_stats = {
+            str(group_a_label): {"count": len(grp_a), "approval_rate": round(ar_a, 4), "tpr": round(tpr_a, 4) if tpr_a is not None else None},
+            str(group_b_label): {"count": len(grp_b), "approval_rate": round(ar_b, 4), "tpr": round(tpr_b, 4) if tpr_b is not None else None},
         }
 
-        # ── Compute metrics ─────────────────────────────────────────────
         dpd_value = abs(ar_a - ar_b)
         dir_value = (min(ar_a, ar_b) / max(ar_a, ar_b)) if max(ar_a, ar_b) > 0 else 1.0
 
         dpd = _metric_block(dpd_value, _DPD_THRESHOLD, flag_above=True)
-        dpd["description"] = "abs(approval_rate_GroupA − approval_rate_GroupB)"
-
         dir_metric = _metric_block(dir_value, _DIR_THRESHOLD, flag_above=False)
-        dir_metric["description"] = "min_approval_rate / max_approval_rate"
 
-        # EOD requires non-None TPRs
-        eod: Dict[str, Any]
         if tpr_a is not None and tpr_b is not None:
             eod_value = abs(tpr_a - tpr_b)
             eod = _metric_block(eod_value, _EOD_THRESHOLD, flag_above=True)
-            eod["description"] = "abs(TPR_GroupA − TPR_GroupB)"
         else:
-            eod = {
-                "value": None,
-                "threshold": _EOD_THRESHOLD,
-                "flagged": False,
-                "result": "N/A — no positive ground-truth rows in one or both groups",
-                "description": "abs(TPR_GroupA − TPR_GroupB)",
-            }
+            eod = {"value": None, "flagged": False, "result": "N/A"}
 
-        # ── Overall pass/fail ───────────────────────────────────────────
-        failing_metrics = [
-            name
-            for name, m in [("DPD", dpd), ("EOD", eod), ("DIR", dir_metric)]
-            if m.get("flagged")
-        ]
-        overall_pass = len(failing_metrics) == 0
-
-        # ── Conflict warning ────────────────────────────────────────────
-        dpd_fails = dpd.get("flagged", False)
-        eod_fails = eod.get("flagged", False)
-        warning: Optional[str] = _CONFLICT_WARNING if (dpd_fails and eod_fails) else None
+        failing_metrics = [name for name, m in [("DPD", dpd), ("EOD", eod), ("DIR", dir_metric)] if m.get("flagged")]
+        warning = _CONFLICT_WARNING if (dpd.get("flagged") and eod.get("flagged")) else None
 
         return {
             "num_rows": len(df),
             "protected_column": protected_column,
-            "positive_label": pos_label,
+            "positive_label": str(pos_label),
             "groups": [str(g) for g in group_labels],
             "group_stats": group_stats,
-            "metrics": {
-                "demographic_parity_difference": dpd,
-                "equal_opportunity_difference": eod,
-                "disparate_impact_ratio": dir_metric,
-            },
+            "metrics": {"demographic_parity_difference": dpd, "equal_opportunity_difference": eod, "disparate_impact_ratio": dir_metric},
             "failing_metrics": failing_metrics,
-            "overall_pass": overall_pass,
+            "overall_pass": len(failing_metrics) == 0,
             "warning": warning,
         }

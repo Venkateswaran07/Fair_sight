@@ -43,23 +43,22 @@ The backend handles data processing, Vertex AI mapping, and Firestore persistenc
 ---
 
 ## 3. Deploy Frontend (React/Vite)
-The frontend must be built with the backend URL injected as an environment variable.
+The frontend must be built with the backend URL injected as an environment variable during the build process.
 
 1.  **Build and Push**:
+    *Uses the cloudbuild.yaml to inject the VITE_API_URL.*
     ```bash
     cd fairsight-ui
-    gcloud builds submit --tag gcr.io/fairsight-494322/fairsight-frontend .
+    gcloud builds submit --config=cloudbuild.yaml .
     ```
 
 2.  **Deploy to Cloud Run**:
-    *Replace `YOUR_BACKEND_URL` with the URL from Step 2.*
     ```bash
     gcloud run deploy fairsight-frontend \
       --image gcr.io/fairsight-494322/fairsight-frontend \
       --platform managed \
       --region us-central1 \
-      --allow-unauthenticated \
-      --set-env-vars="VITE_API_URL=YOUR_BACKEND_URL"
+      --allow-unauthenticated
     ```
 
 ---

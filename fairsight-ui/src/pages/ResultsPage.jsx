@@ -12,7 +12,8 @@ export default function ResultsPage() {
     const sessionId = params.get('session_id')
 
     async function loadFromHistory(id) {
-      const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+      const PRODUCTION_BACKEND_URL = 'https://fairsight-backend-403339568263.us-central1.run.app'
+      const baseUrl = import.meta.env.VITE_API_URL || (window.location.hostname === 'localhost' ? 'http://localhost:8000' : PRODUCTION_BACKEND_URL)
       try {
         const res = await fetch(`${baseUrl}/audit/history`)
         if (res.ok) {

@@ -16,13 +16,20 @@ function FieldError({ msg }) {
   ) : null
 }
 
+const PRODUCTION_BACKEND_URL = 'https://fairsight-backend-403339568263.us-central1.run.app'
+
 export default function UploadPage() {
   const navigate = useNavigate()
+  const baseUrl = import.meta.env.VITE_API_URL || (window.location.hostname === 'localhost' ? 'http://localhost:8000' : PRODUCTION_BACKEND_URL)
 
   /* ── Form state ──────────────────────────────────────────────── */
   const [datasetFile, setDatasetFile]     = useState(null)
   const [predictFile, setPredictFile]     = useState(null)
   const [protectedCols, setProtectedCols] = useState('')
+  
+  // Session IDs for the uploaded files
+  const [datasetSessionId, setDatasetSessionId] = useState(null)
+  const [predictSessionId, setPredictSessionId] = useState(null)
 
   /* ── UI state ────────────────────────────────────────────────── */
   const [loading, setLoading]   = useState(false)
@@ -36,57 +43,73 @@ export default function UploadPage() {
   const [previewSearch, setPreviewSearch] = useState('')
   const [isAnalyzingHeaders, setIsAnalyzingHeaders] = useState(false)
 
-  /* ── Auto-parse CSV file for preview ─────────────────────────── */
+  /* ── Background Upload & Preview ─────────────────────────────── */
+  // Unified upload function to handle sequential queue
+  const [uploadQueue, setUploadQueue] = useState(Promise.resolve())
+
+  const [isUploading, setIsUploading] = useState({ dataset: false, predict: false })
+
+  const performUpload = async (file, type) => {
+    setIsUploading(prev => ({ ...prev, [type]: true }))
+    console.log(`[FairSight] Uploading ${type} to: ${baseUrl}/audit/upload`)
+    
+    const formData = new FormData()
+    formData.append('file', file)
+    
+    try {
+        const res = await fetch(`${baseUrl}/audit/upload`, { 
+          method: 'POST', 
+          body: formData 
+        })
+        if (res.ok) {
+            const data = await res.json()
+            console.log(`[FairSight] ${type} upload success. Session: ${data.session_id}`)
+            
+            if (type === 'dataset') setDatasetSessionId(data.session_id)
+            else setPredictSessionId(data.session_id)
+            
+            // Show preview
+            setCsvPreview({ headers: data.headers, allRows: data.preview_rows, total: data.total_rows })
+        } else {
+            const text = await res.text()
+            setError(`Upload failed (${res.status}). If your file is very large (>100MB), the server might reject it.`)
+        }
+    } catch (e) {
+        console.error(`[FairSight] ${type} upload error:`, e)
+        setError(`Connection failed. The backend might be starting up (Cold Start) or the 90MB file timed out. Please wait 10 seconds and try dropping the file again.`)
+    } finally {
+        setIsUploading(prev => ({ ...prev, [type]: false }))
+    }
+  }
+
+  // Effect for Dataset File
   useEffect(() => {
-    const fileToPreview = predictFile || datasetFile
-    if (!fileToPreview) {
-        setCsvPreview(null)
+    if (!datasetFile) {
+        setDatasetSessionId(null)
         return
     }
-    
-    // Immediate background upload to get AI-mapped headers
-    const uploadToGetHeaders = async () => {
-        setIsAnalyzingHeaders(true)
-        const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-        const formData = new FormData()
-        formData.append('file', fileToPreview)
-        try {
-            const res = await fetch(`${baseUrl}/audit/upload`, { method: 'POST', body: formData })
-            if (res.ok) {
-                const data = await res.json()
-                if (data && data.headers) {
-                    // Update preview with AI-NORMALIZED data from backend
-                    setCsvPreview({ 
-                        headers: data.headers, 
-                        allRows: data.preview_rows, 
-                        total: data.total_rows 
-                    })
-                    setIsAnalyzingHeaders(false)
-                    return
-                }
-            }
-        } catch (e) {
-            console.error("Auto-mapping upload failed", e)
-        }
-
-        // Fallback: Local parsing
-        const reader = new FileReader()
-        reader.onload = (e) => {
-            const text = e.target.result
-            const lines = text.split(/\r?\n/).filter(line => line.trim())
-            if (lines.length > 0) {
-                const stripQuotes = (s) => s.trim().replace(/^["'](.+)["']$/, '$1')
-                const headers = lines[0].split(',').map(stripQuotes)
-                const allRows = lines.slice(1).map(line => line.split(',').map(stripQuotes))
-                setCsvPreview({ headers, allRows, total: lines.length - 1 })
-            }
-            setIsAnalyzingHeaders(false)
-        }
-        reader.readAsText(fileToPreview)
+    // If files are identical, share the session
+    if (predictFile && datasetFile.name === predictFile.name && datasetFile.size === predictFile.size && predictSessionId) {
+        setDatasetSessionId(predictSessionId)
+        return
     }
-    
-    uploadToGetHeaders()
-  }, [datasetFile, predictFile])
+    setUploadQueue(prev => prev.then(() => performUpload(datasetFile, 'dataset')))
+  }, [datasetFile])
+
+  // Effect for Prediction File
+  useEffect(() => {
+    if (!predictFile) {
+        setPredictSessionId(null)
+        return
+    }
+    // If files are identical, share the session
+    if (datasetFile && predictFile.name === datasetFile.name && predictFile.size === datasetFile.size && datasetSessionId) {
+        setPredictSessionId(datasetSessionId)
+        return
+    }
+    setIsAnalyzingHeaders(true)
+    setUploadQueue(prev => prev.then(() => performUpload(predictFile, 'predict')).finally(() => setIsAnalyzingHeaders(false)))
+  }, [predictFile])
 
   const handleHeaderClick = (header) => {
       const current = protectedCols.split(',').map(s => s.trim()).filter(Boolean)
@@ -116,29 +139,12 @@ export default function UploadPage() {
     try {
       const cols = protectedCols.split(',').map(s => s.trim()).filter(Boolean)
 
-      const formDemo = new FormData()
-      formDemo.append('file', datasetFile)
-      formDemo.append('protected_columns', JSON.stringify(cols))
-
-      const formPerf = new FormData()
-      formPerf.append('file', predictFile)
-      formPerf.append('protected_columns', JSON.stringify(cols))
-      formPerf.append('prediction_column', 'prediction')
-      formPerf.append('ground_truth_column', 'ground_truth')
-      
-      const formFair = new FormData()
-      formFair.append('file', predictFile)
-      formFair.append('protected_column', cols[0])
-      formFair.append('positive_label', '1')
-
-      const formProxy = new FormData()
-      formProxy.append('file', datasetFile)
-      formProxy.append('protected_columns', JSON.stringify(cols))
-
-      const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
-
-      const fetchApi = async (path, bodyData) => {
-        const res = await fetch(`${baseUrl}${path}`, { method: 'POST', body: bodyData })
+      const fetchWithSession = async (path, sessionId, additionalFields = {}) => {
+        const formData = new FormData()
+        formData.append('session_id', sessionId)
+        Object.entries(additionalFields).forEach(([k, v]) => formData.append(k, v))
+        
+        const res = await fetch(`${baseUrl}${path}`, { method: 'POST', body: formData })
         if (!res.ok) {
            const text = await res.text()
            throw new Error(`Error on ${path}: ${res.statusText} - ${text}`)
@@ -146,12 +152,12 @@ export default function UploadPage() {
         return res.json()
       }
 
-      const [demographics, performance, fairness, proxies] = await Promise.all([
-        fetchApi('/audit/demographics', formDemo),
-        fetchApi('/audit/performance', formPerf),
-        fetchApi('/audit/fairness', formFair),
-        fetchApi('/audit/proxies', formProxy),
-      ])
+      // Sequential requests using Session IDs (PREVENT OOM)
+      // We run them one by one so the backend doesn't try to process 4 large analyses simultaneously
+      const demographics = await fetchWithSession('/audit/demographics', datasetSessionId, { protected_columns: JSON.stringify(cols) })
+      const performance  = await fetchWithSession('/audit/performance', predictSessionId, { protected_columns: JSON.stringify(cols) })
+      const fairness     = await fetchWithSession('/audit/fairness', predictSessionId, { protected_column: cols[0], positive_label: '1' })
+      const proxies      = await fetchWithSession('/audit/proxies', datasetSessionId, { protected_columns: JSON.stringify(cols) })
 
       const fullResult = { 
         demographics, 
@@ -159,7 +165,7 @@ export default function UploadPage() {
         fairness, 
         proxies,
         protected_attributes: cols,
-        fairness_assessment: (fairness.disparate_impact >= 0.8 && fairness.disparate_impact <= 1.25) ? "FAIR" : "BIASED",
+        fairness_assessment: (fairness.overall_pass) ? "FAIR" : "BIASED",
         metrics: fairness
       }
       
@@ -168,7 +174,7 @@ export default function UploadPage() {
         await fetch(`${baseUrl}/audit/history/save`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(fullResult)
+          body: JSON.stringify({ ...fullResult, session_id: predictSessionId })
         })
       } catch (saveErr) {
         console.error("Failed to auto-save to history:", saveErr)
@@ -239,6 +245,7 @@ export default function UploadPage() {
                 hint="Used for demographics & proxy analysis"
                 file={datasetFile}
                 onFile={(f) => { setDatasetFile(f); setFieldErrors(e => ({ ...e, dataset: '' })) }}
+                loading={isUploading.dataset}
               />
               <FieldError msg={fieldErrors.dataset} />
             </div>
@@ -250,6 +257,7 @@ export default function UploadPage() {
                 hint="Requires prediction and ground_truth columns"
                 file={predictFile}
                 onFile={(f) => { setPredictFile(f); setFieldErrors(e => ({ ...e, predict: '' })) }}
+                loading={isUploading.predict}
               />
               <FieldError msg={fieldErrors.predict} />
             </div>

@@ -144,7 +144,6 @@ async def save_history(record: dict):
     """
     Save a full audit result (fairness + performance + demographics) to history.
     """
-    from app.db import db
     from datetime import datetime, timezone
     
     try:
@@ -153,7 +152,13 @@ async def save_history(record: dict):
         if "timestamp" not in record:
             record["timestamp"] = datetime.now(timezone.utc).isoformat()
             
-        db.collection("audit_history").document(session_id).set(record)
+        try:
+            from app.db import db
+            db.collection("audit_history").document(session_id).set(record)
+        except Exception as e:
+            print(f"[Warning] Firestore save failed: {e}. Saving to local history.")
+            audit_svc._save_to_local_history(record)
+            
         return {"status": "success", "session_id": session_id}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to save history: {exc}")
@@ -288,7 +293,8 @@ async def counterfactual(
 # ---------------------------------------------------------------------------
 @router.post("/demographics", response_model=DemographicsResponse)
 async def demographics(
-    file: UploadFile = File(..., description="CSV dataset to analyze"),
+    file: UploadFile = File(None, description="CSV dataset to analyze"),
+    session_id: str = Form(None),
     protected_columns: str = Form(
         ...,
         description='JSON array of column names to analyse, e.g. ["gender","race"]',
@@ -296,38 +302,24 @@ async def demographics(
 ):
     """
     Analyse the demographic distribution of one or more protected columns.
-
-    **Request (multipart/form-data)**
-    - `file` — CSV upload
-    - `protected_columns` — JSON-encoded list of column names, e.g. `["gender","race"]`
-
-    **Response fields per column**
-    | Field | Description |
-    |---|---|
-    | `value_counts` | raw count per unique value |
-    | `percentages` | percentage share per unique value |
-    | `representation_score` | `min_pct / max_pct` — 1.0 = perfect balance |
-    | `underrepresented_groups` | groups below 10 % threshold |
-    | `has_underrepresentation` | `true` if any group < 10 % |
     """
-    # --- validate file type
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files are accepted.")
-
     # --- parse and normalize protected_columns from JSON string
     try:
         raw_cols: list = json.loads(protected_columns)
-        if not isinstance(raw_cols, list) or not all(isinstance(c, str) for c in raw_cols):
-            raise ValueError
         columns = normalize_column_list(raw_cols)
     except (json.JSONDecodeError, ValueError):
-        raise HTTPException(
-            status_code=422,
-            detail='protected_columns must be a JSON array of strings, e.g. ["gender","race"]',
-        )
+        raise HTTPException(status_code=422, detail='Invalid protected_columns format')
 
-    if not columns:
-        raise HTTPException(status_code=422, detail="protected_columns list must not be empty.")
+    if session_id:
+        try:
+            df = audit_svc.get_dataset(session_id)
+            result = demographics_svc.analyze_df(df, columns)
+            return JSONResponse(content=result)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+    if not file:
+        raise HTTPException(status_code=400, detail="Either file or session_id is required")
 
     raw = await file.read()
     result = demographics_svc.analyze(raw, columns)
@@ -339,10 +331,8 @@ async def demographics(
 # ---------------------------------------------------------------------------
 @router.post("/performance", response_model=PerformanceResponse)
 async def performance(
-    file: UploadFile = File(
-        ...,
-        description="CSV with columns: prediction, ground_truth, + protected attribute columns",
-    ),
+    file: UploadFile = File(None),
+    session_id: str = Form(None),
     protected_columns: str = Form(
         ...,
         description='JSON array of protected column names, e.g. ["gender","race"]',
@@ -350,42 +340,23 @@ async def performance(
 ):
     """
     Compute per-group ML performance metrics for each protected attribute.
-
-    **Required CSV columns**
-    - `prediction` — model output label
-    - `ground_truth` — actual label
-
-    **Request (multipart/form-data)**
-    - `file` — CSV upload
-    - `protected_columns` — JSON-encoded list, e.g. `["gender","race"]`
-
-    **Per-group metrics**
-    `accuracy`, `precision`, `recall`, `f1` (all weighted-average)
-
-    **Gap analysis** (per metric)
-    | Field | Description |
-    |---|---|
-    | `best_group` / `worst_group` | group with highest / lowest score |
-    | `gap` | `best_score − worst_score` |
-    | `flagged` | `true` when gap > 0.10 (10 percentage points) |
-    | `any_metric_flagged` | `true` when ≥ 1 metric is flagged for that column |
     """
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files are accepted.")
-
     try:
         raw_cols: list = json.loads(protected_columns)
-        if not isinstance(raw_cols, list) or not all(isinstance(c, str) for c in raw_cols):
-            raise ValueError
         columns = normalize_column_list(raw_cols)
     except (json.JSONDecodeError, ValueError):
-        raise HTTPException(
-            status_code=422,
-            detail='protected_columns must be a JSON array of strings, e.g. ["gender","race"]',
-        )
+        raise HTTPException(status_code=422, detail='Invalid protected_columns format')
 
-    if not columns:
-        raise HTTPException(status_code=422, detail="protected_columns list must not be empty.")
+    if session_id:
+        try:
+            df = audit_svc.get_dataset(session_id)
+            result = performance_svc.analyze_df(df, columns)
+            return JSONResponse(content=result)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+    if not file:
+        raise HTTPException(status_code=400, detail="Either file or session_id is required")
 
     raw = await file.read()
 
@@ -403,67 +374,26 @@ async def performance(
 # ---------------------------------------------------------------------------
 @router.post("/fairness", response_model=FairnessResponse)
 async def fairness(
-    file: UploadFile = File(
-        ...,
-        description="CSV with columns: prediction, ground_truth, + one binary protected attribute column",
-    ),
-    protected_column: str = Form(
-        ...,
-        description="Name of the binary protected attribute column (must have exactly 2 unique values)",
-    ),
-    positive_label: str = Form(
-        "1",
-        description=(
-            "The positive / favourable class label as a string. "
-            "Auto-converted to match the column dtype (e.g. '1' → int 1). Default: '1'."
-        ),
-    ),
+    file: UploadFile = File(None),
+    session_id: str = Form(None),
+    protected_column: str = Form(..., description="Name of the binary protected attribute column"),
+    positive_label: str = Form("1"),
 ):
-    """
-    Compute three fairness metrics for a **binary** protected attribute.
+    """Compute fairness metrics for a binary protected attribute."""
+    if session_id:
+        try:
+            df = audit_svc.get_dataset(session_id)
+            result = fairness_svc.analyze_df(df, protected_column, positive_label)
+            return JSONResponse(content=result)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Session not found")
 
-    **Required CSV columns**
-    - `prediction`   — model output label
-    - `ground_truth` — actual label
-    - `<protected_column>` — a column with exactly **2** unique values
-
-    **Metrics**
-
-    | Metric | Formula | Fail threshold |
-    |---|---|---|
-    | Demographic Parity Difference (DPD) | `abs(approval_rate_A − approval_rate_B)` | > 0.10 |
-    | Equal Opportunity Difference (EOD) | `abs(TPR_A − TPR_B)` | > 0.10 |
-    | Disparate Impact Ratio (DIR) | `min_approval / max_approval` | < 0.80 |
-
-    **Warning** — when both DPD and EOD fail simultaneously, a `warning` field is
-    returned explaining the mathematical tension between the two fairness definitions
-    (Chouldechova 2017 / Kleinberg et al. 2016).
-    """
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files are accepted.")
+    if not file:
+        raise HTTPException(status_code=400, detail="Either file or session_id is required")
 
     raw = await file.read()
-
     try:
-        prot_col = normalize_string(protected_column)
-        result = fairness_svc.analyze(raw, prot_col, positive_label)
-        
-        # Auto-save to history for the dashboard
-        from datetime import datetime, timezone
-        audit_entry = {
-            "session_id": f"audit_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "num_rows": len(pd.read_csv(io.BytesIO(raw))),
-            "protected_attributes": [protected_column],
-            "fairness_assessment": "Analyzed",
-            "metrics": {
-                "disparate_impact": result.get("disparate_impact", 0),
-                "statistical_parity_difference": result.get("statistical_parity_difference", 0)
-            }
-        }
-        from app.db import db
-        db.collection("audit_history").document(audit_entry["session_id"]).set(audit_entry)
-        
+        result = fairness_svc.analyze(raw, protected_column, positive_label)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -475,52 +405,32 @@ async def fairness(
 # ---------------------------------------------------------------------------
 @router.post("/proxies", response_model=ProxyResponse)
 async def detect_proxies(
-    file: UploadFile = File(
-        ...,
-        description="CSV dataset. May contain protected and non-protected columns.",
-    ),
+    file: UploadFile = File(None),
+    session_id: str = Form(None),
     protected_columns: str = Form(
         ...,
         description='JSON array of protected column names, e.g. ["gender","race"]',
     ),
 ):
     """
-    Identify non-protected features that may act as **proxy variables** for
-    protected attributes.
-
-    **Request (multipart/form-data)**
-    - `file` — CSV upload
-    - `protected_columns` — JSON array, e.g. `["gender","race"]`
-
-    **Scoring method (per feature × protected-column pair)**
-
-    | Signal | Method | Range |
-    |---|---|---|
-    | Pearson correlation | `abs(r)` — numeric cols (categoricals label-encoded) | 0 – 1 |
-    | Mutual Information | `mutual_info_classif` normalised by H(protected) | 0 – 1 |
-    | `proxy_risk_score` | `max(pearson, MI_normalised)` | 0 – 1 |
-
-    The **overall** `proxy_risk_score` for a feature is the maximum across all
-    protected columns.  Features are returned sorted descending by that score.
-
-    **Risk flag** — `proxy_risk_score > 0.3` → **HIGH RISK**
+    Identify non-protected features that may act as proxy variables.
     """
-    if not file.filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="Only CSV files are accepted.")
-
     try:
         raw_cols: list = json.loads(protected_columns)
-        if not isinstance(raw_cols, list) or not all(isinstance(c, str) for c in raw_cols):
-            raise ValueError
         columns = normalize_column_list(raw_cols)
     except (json.JSONDecodeError, ValueError):
-        raise HTTPException(
-            status_code=422,
-            detail='protected_columns must be a JSON array of strings, e.g. ["gender","race"]',
-        )
+        raise HTTPException(status_code=422, detail='Invalid protected_columns format')
 
-    if not columns:
-        raise HTTPException(status_code=422, detail="protected_columns list must not be empty.")
+    if session_id:
+        try:
+            df = audit_svc.get_dataset(session_id)
+            result = proxy_svc.analyze_df(df, columns)
+            return JSONResponse(content=result)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+    if not file:
+        raise HTTPException(status_code=400, detail="Either file or session_id is required")
 
     raw = await file.read()
 

@@ -11,7 +11,7 @@ from google.oauth2 import service_account
 # ── Simple in-memory cache ──────────────────────────────────────────────────
 _mapping_cache: Dict[str, Dict[str, str]] = {}
 
-_MODEL = "gemini-1.5-flash"
+_MODEL = "gemini-2.0-flash-001"
 _PROJECT_ID = "fairsight-494322"
 _LOCATION = "us-central1"
 

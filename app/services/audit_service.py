@@ -20,7 +20,7 @@ class AuditService:
         """Parse CSV bytes, perform smart mapping, store in memory."""
         from app.utils.data_utils import normalize_dataframe_headers
         df = pd.read_csv(io.BytesIO(raw_bytes))
-        df = normalize_dataframe_headers(df) # Auto-rename columns
+        df = normalize_dataframe_headers(df, fast_mode=True) # Fast mode for UI preview
         session_id = str(uuid.uuid4())
         _sessions[session_id] = df
         
@@ -90,17 +90,51 @@ class AuditService:
             "fairness_assessment": self._assess_fairness(metric.disparate_impact()),
         }
 
-        # Persist results to Firestore
-        from app.db import db
-        db.collection("audit_history").document(request.session_id).set(results)
+        # Persist results to Firestore with Local Fallback
+        try:
+            from app.db import db
+            db.collection("audit_history").document(request.session_id).set(results)
+        except Exception as e:
+            print(f"[Warning] Failed to save to Firestore: {e}. Saving to local JSON.")
+            self._save_to_local_history(results)
 
         return results
 
     def get_history(self) -> list:
-        """Fetch all audits from Firestore, sorted by timestamp descending."""
-        from app.db import db
-        docs = db.collection("audit_history").order_by("timestamp", direction="DESCENDING").stream()
-        return [doc.to_dict() for doc in docs]
+        """Fetch all audits from Firestore, with local JSON fallback."""
+        history = []
+        try:
+            from app.db import db
+            docs = db.collection("audit_history").order_by("timestamp", direction="DESCENDING").stream()
+            history = [doc.to_dict() for doc in docs]
+        except Exception as e:
+            print(f"[Warning] Firestore fetch failed: {e}. Trying local history.")
+            history = self._get_local_history()
+            
+        return history
+
+    def _save_to_local_history(self, record: dict):
+        """Helper to save audit to a local JSON file."""
+        import json
+        import os
+        filename = "fairsight_history.json"
+        history = self._get_local_history()
+        history.insert(0, record) # Newest first
+        with open(filename, "w") as f:
+            json.dump(history, f, indent=2)
+
+    def _get_local_history(self) -> list:
+        """Helper to read audit history from a local JSON file."""
+        import json
+        import os
+        filename = "fairsight_history.json"
+        if os.path.exists(filename):
+            with open(filename, "r") as f:
+                try:
+                    return json.load(f)
+                except:
+                    return []
+        return []
 
     # ------------------------------------------------------------------
     # Helpers

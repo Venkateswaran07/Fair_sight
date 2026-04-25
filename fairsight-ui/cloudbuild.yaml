@@ -1,0 +1,10 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: [
+    'build',
+    '--build-arg', 'VITE_API_URL=https://fairsight-backend-403339568263.us-central1.run.app',
+    '-t', 'gcr.io/fairsight-494322/fairsight-frontend',
+    '.'
+  ]
+images:
+- 'gcr.io/fairsight-494322/fairsight-frontend'

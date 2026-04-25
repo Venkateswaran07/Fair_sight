@@ -64,92 +64,51 @@ def _column_entropy(series: pd.Series) -> float:
 # ── Service ────────────────────────────────────────────────────────────────
 
 class ProxyDetectionService:
-    def analyze(
-        self,
-        raw_bytes: bytes,
-        protected_columns: List[str],
-    ) -> Dict[str, Any]:
-        """
-        Parameters
-        ----------
-        raw_bytes
-            Raw bytes of the uploaded CSV.
-        protected_columns
-            List of column names to treat as protected attributes.
-
-        Returns
-        -------
-        dict  (see module docstring for full schema)
-
-        Raises
-        ------
-        ValueError
-            When all requested protected columns are absent from the CSV.
-        """
-        from app.utils.data_utils import normalize_dataframe_headers, normalize_string
+    def analyze(self, raw_bytes: bytes, protected_columns: List[str]) -> Dict[str, Any]:
+        from app.utils.data_utils import normalize_dataframe_headers
         df = pd.read_csv(io.BytesIO(raw_bytes))
         df = normalize_dataframe_headers(df)
+        return self.analyze_df(df, protected_columns)
 
+    def analyze_df(self, df: pd.DataFrame, protected_columns: List[str]) -> Dict[str, Any]:
+        """Detect proxy features in a normalized DataFrame."""
+        from app.utils.data_utils import normalize_string
+        
         # Normalize requested column names
         norm_protected_cols = [normalize_string(c) for c in protected_columns]
-        
         present_protected = [c for c in norm_protected_cols if c in df.columns]
         missing_protected = [c for c in norm_protected_cols if c not in df.columns]
 
         if not present_protected:
-            print(f"[ProxyService] None of the requested protected columns {norm_protected_cols} were found in the dataset. Skipping proxy analysis.")
-            return {
-                "missing_protected": missing_protected,
-                "features": [],
-                "high_risk_features": []
-            }
-        non_protected_cols = [c for c in df.columns if c not in norm_protected_cols]
+            return {"missing_protected": missing_protected, "features": [], "high_risk_features": []}
 
-        # Pre-compute numeric representations for every column used
-        encoded: Dict[str, pd.Series] = {
-            col: _to_numeric(df[col]) for col in df.columns
-        }
+        non_protected_cols = [c for c in df.columns if c not in norm_protected_cols and c not in ("prediction", "ground_truth")]
 
-        # Pre-compute entropy for each protected column (for MI normalisation)
-        prot_entropy: Dict[str, float] = {
-            col: _column_entropy(df[col]) for col in present_protected
-        }
+        # Limit mutual information to first 10k rows to avoid memory/timeout crashes on large datasets
+        # This still provides a very strong statistical signal.
+        sample_df = df.head(10000) if len(df) > 10000 else df
 
-        feature_rows: List[Dict[str, Any]] = []
+        encoded = {col: _to_numeric(sample_df[col]) for col in sample_df.columns}
+        prot_entropy = {col: _column_entropy(sample_df[col]) for col in present_protected}
 
+        feature_rows = []
         for feat in non_protected_cols:
-            feat_enc = encoded[feat].values.reshape(-1, 1)   # shape (n, 1)
+            feat_enc = encoded[feat].values.reshape(-1, 1)
             feat_series = encoded[feat]
-
-            per_protected: Dict[str, Any] = {}
-            all_scores: List[float] = []
+            per_protected = {}
+            all_scores = []
 
             for prot in present_protected:
                 prot_enc = encoded[prot]
-
-                # ── Pearson correlation ─────────────────────────────────
                 pearson = abs(float(feat_series.corr(prot_enc)))
-                if np.isnan(pearson):
-                    pearson = 0.0
+                if np.isnan(pearson): pearson = 0.0
 
-                # ── Mutual Information ──────────────────────────────────
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
-                    mi_raw = float(
-                        mutual_info_classif(
-                            feat_enc,
-                            prot_enc.values,
-                            discrete_features=False,
-                            random_state=42,
-                        )[0]
-                    )
+                    mi_raw = float(mutual_info_classif(feat_enc, prot_enc.values, discrete_features=False, random_state=42)[0])
 
-                # Normalise MI by H(protected); clamp to [0, 1]
                 h = prot_entropy[prot]
-                mi_norm = min(mi_raw / h, 1.0) if h > 0 else 0.0
-                mi_norm = max(mi_norm, 0.0)
-
-                # ── Per-protected proxy score ───────────────────────────
+                mi_norm = max(0.0, min(mi_raw / h, 1.0)) if h > 0 else 0.0
                 pair_score = round(max(pearson, mi_norm), 4)
                 all_scores.append(pair_score)
 
@@ -159,23 +118,17 @@ class ProxyDetectionService:
                     "proxy_risk_score": pair_score,
                 }
 
-            # ── Overall feature proxy score ─────────────────────────────
             overall_score = round(max(all_scores) if all_scores else 0.0, 4)
             flagged = overall_score > _PROXY_THRESHOLD
+            feature_rows.append({
+                "feature": feat,
+                "proxy_risk_score": overall_score,
+                "risk_level": "HIGH RISK" if flagged else "LOW RISK",
+                "flagged": flagged,
+                "per_protected_column": per_protected,
+            })
 
-            feature_rows.append(
-                {
-                    "feature": feat,
-                    "proxy_risk_score": overall_score,
-                    "risk_level": "HIGH RISK" if flagged else "LOW RISK",
-                    "flagged": flagged,
-                    "per_protected_column": per_protected,
-                }
-            )
-
-        # Sort descending by proxy_risk_score
         feature_rows.sort(key=lambda r: r["proxy_risk_score"], reverse=True)
-
         high_risk = [r["feature"] for r in feature_rows if r["flagged"]]
 
         return {

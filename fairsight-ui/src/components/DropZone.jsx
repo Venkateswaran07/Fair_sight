@@ -11,18 +11,20 @@ import { useRef, useState } from 'react'
  * file        File|null
  * onFile      (File) => void
  */
-export default function DropZone({ label, hint, accept = '.csv', file, onFile }) {
+export default function DropZone({ label, hint, accept = '.csv', file, onFile, loading = false }) {
   const inputRef = useRef(null)
   const [dragging, setDragging] = useState(false)
 
   function handleDrop(e) {
     e.preventDefault()
+    if (loading) return
     setDragging(false)
     const dropped = e.dataTransfer.files[0]
     if (dropped) onFile(dropped)
   }
 
   function handleChange(e) {
+    if (loading) return
     const chosen = e.target.files[0]
     if (chosen) onFile(chosen)
   }
@@ -32,15 +34,17 @@ export default function DropZone({ label, hint, accept = '.csv', file, onFile })
       role="button"
       tabIndex={0}
       aria-label={`Upload zone: ${label}. ${file ? `Selected: ${file.name}` : 'No file selected.'}`}
-      onClick={() => inputRef.current.click()}
-      onKeyDown={(e) => e.key === 'Enter' && inputRef.current.click()}
-      onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+      onClick={() => !loading && inputRef.current.click()}
+      onKeyDown={(e) => e.key === 'Enter' && !loading && inputRef.current.click()}
+      onDragOver={(e) => { e.preventDefault(); if (!loading) setDragging(true) }}
       onDragLeave={() => setDragging(false)}
       onDrop={handleDrop}
       className={[
         'border-2 border-dashed rounded-lg px-6 py-8 cursor-pointer select-none',
         'transition-colors duration-150',
-        dragging
+        loading
+          ? 'border-blue-400 bg-blue-50 cursor-wait'
+          : dragging
           ? 'border-accent bg-blue-50'
           : file
           ? 'border-green-400 bg-green-50'
@@ -54,11 +58,13 @@ export default function DropZone({ label, hint, accept = '.csv', file, onFile })
         className="hidden"
         onChange={handleChange}
         aria-hidden="true"
+        disabled={loading}
       />
 
       <div className="flex flex-col items-center gap-2 text-center pointer-events-none">
-        {/* Upload icon — inline SVG, no library dependency */}
-        {file ? (
+        {loading ? (
+          <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+        ) : file ? (
           <svg className="w-8 h-8 text-green-500" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
           </svg>
@@ -68,9 +74,11 @@ export default function DropZone({ label, hint, accept = '.csv', file, onFile })
           </svg>
         )}
 
-        <p className="text-sm font-medium text-gray-900">{label}</p>
+        <p className="text-sm font-medium text-gray-900">{loading ? 'Uploading...' : label}</p>
 
-        {file ? (
+        {loading ? (
+          <p className="text-xs text-blue-600 animate-pulse">Please wait for 90MB file...</p>
+        ) : file ? (
           <p className="text-xs text-green-700 font-medium">{file.name}</p>
         ) : (
           <>

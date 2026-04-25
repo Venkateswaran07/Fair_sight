@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from app.models.report_models import ReportRequest
 from app.services.report_service import ReportService
 
-router = APIRouter()
+router = APIRouter(redirect_slashes=False)
 report_svc = ReportService()
 
 

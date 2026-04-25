@@ -26,7 +26,8 @@ export default function ExplainPage() {
     }
     
     const syncWithBackend = async () => {
-        const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+        const PRODUCTION_BACKEND_URL = 'https://fairsight-backend-403339568263.us-central1.run.app'
+        const baseUrl = import.meta.env.VITE_API_URL || (window.location.hostname === 'localhost' ? 'http://localhost:8000' : PRODUCTION_BACKEND_URL)
         const formData = new FormData()
         formData.append('file', datasetFile)
         try {
@@ -118,7 +119,8 @@ export default function ExplainPage() {
             throw new Error(`Failed to extract row data: ${e.message}`)
         }
 
-        const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+        const PRODUCTION_BACKEND_URL = 'https://fairsight-backend-403339568263.us-central1.run.app'
+        const baseUrl = import.meta.env.VITE_API_URL || (window.location.hostname === 'localhost' ? 'http://localhost:8000' : PRODUCTION_BACKEND_URL)
 
         // 1. Fetch SHAP Explain
         const formExplain = new FormData()

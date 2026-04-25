@@ -5,7 +5,7 @@ import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
 from google.oauth2 import service_account
 
-_MODEL = "gemini-1.5-flash"
+_MODEL = "gemini-2.0-flash-001"
 _PROJECT_ID = "fairsight-494322"
 _LOCATION = "us-central1"
 

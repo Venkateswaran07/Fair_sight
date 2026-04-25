@@ -62,64 +62,40 @@ def _gap_analysis(group_metrics: Dict[str, Dict[str, float]]) -> Dict[str, Any]:
 
 class PerformanceService:
     def analyze(self, raw_bytes: bytes, protected_columns: List[str]) -> Dict[str, Any]:
-        """
-        Read a CSV from *raw_bytes*, normalize columns, validate, and compute metrics.
-        """
-        from app.utils.data_utils import normalize_dataframe_headers, normalize_string
+        from app.utils.data_utils import normalize_dataframe_headers
         df = pd.read_csv(io.BytesIO(raw_bytes))
         df = normalize_dataframe_headers(df)
+        return self.analyze_df(df, protected_columns)
 
+    def analyze_df(self, df: pd.DataFrame, protected_columns: List[str]) -> Dict[str, Any]:
+        """Compute performance metrics for a normalized DataFrame."""
+        from app.utils.data_utils import normalize_string
+        
         # --- validate required columns
         missing_required = _REQUIRED_COLS - set(df.columns)
         if missing_required:
-            print(f"[PerformanceService] Missing columns! Required: {_REQUIRED_COLS}, Found: {list(df.columns)}")
-            raise ValueError(
-                f"CSV is missing required column(s): {sorted(missing_required)}. "
-                f"The file must contain 'prediction' and 'ground_truth' columns. Found: {list(df.columns)}"
-            )
+            raise ValueError(f"Missing required columns: {sorted(missing_required)}")
 
-        # ── Flexible Column Lookup ──────────────────────────────────────
-        # Find headers even if they were renamed (e.g. sex -> gender)
         present_cols = []
         missing_cols = []
         available_cols = set(df.columns)
         
-        mappings_map = {
-            "gender": ["sex", "m_f", "gender"],
-            "age": ["dob", "birth", "age"],
-            "race": ["ethnicity", "race"]
-        }
-
         for requested in protected_columns:
             norm_requested = normalize_string(requested)
-            found = False
-            
-            # 1. Exact match
             if norm_requested in available_cols:
                 present_cols.append(norm_requested)
-                found = True
-            
-            # 2. Synonym match
-            if not found:
-                for std, synonyms in mappings_map.items():
-                    if norm_requested in synonyms and std in available_cols:
-                        present_cols.append(std)
-                        found = True
-                        break
-            
-            # 3. Substring match
-            if not found:
+            else:
+                # Substring fallback
+                found = False
                 for col in available_cols:
                     if norm_requested in col:
                         present_cols.append(col)
                         found = True
                         break
-            
-            if not found:
-                missing_cols.append(requested)
+                if not found:
+                    missing_cols.append(requested)
 
         overall_metrics = _safe_metrics(df["ground_truth"], df["prediction"])
-
         column_results: Dict[str, Any] = {}
 
         for col in present_cols:
@@ -129,7 +105,6 @@ class PerformanceService:
             for group_val, subset in df.groupby(col, observed=True):
                 label = str(group_val)
                 n = len(subset)
-
                 if n < _MIN_GROUP_SAMPLES:
                     skipped_groups.append(label)
                     continue
@@ -138,11 +113,7 @@ class PerformanceService:
                 groups[label] = {"count": n, **metrics}
 
             gaps = _gap_analysis(groups)
-
-            # Overall flag: true if *any* metric is flagged
-            any_flagged = any(
-                info["flagged"] for info in gaps.values() if info is not None
-            )
+            any_flagged = any(info["flagged"] for info in gaps.values() if info is not None)
 
             column_results[col] = {
                 "groups": groups,

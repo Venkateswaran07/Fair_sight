@@ -1,4 +1,5 @@
 import re
+from typing import Dict, Any
 import pandas as pd
 
 def normalize_string(s: str) -> str:
@@ -17,19 +18,19 @@ def normalize_column_list(cols: list) -> list:
     """Normalize a list of column names for matching."""
     return [normalize_string(c) for c in cols]
 
-def normalize_dataframe_headers(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_dataframe_headers(df: pd.DataFrame, fast_mode: bool = False) -> pd.DataFrame:
     """
     Universally map varied column names to standard FairSight names.
     Step 1: Fast regex/fuzzy matching.
-    Step 2: If critical columns are still missing, call Gemini AI for discovery.
+    Step 2: If critical columns are still missing and not in fast_mode, call Gemini AI.
     """
     new_columns = {}
-
-    # Mapping patterns - strictly defined to avoid greedy matches
+    
+    # Mapping patterns
     mappings = {
         "ground_truth": [
             r"^ground[_ ]?truth$", r"^actual$", r"^label$", r"^target$",
-            r"^suitability$", r"^should[-_]hire$", r"^outcome$", r"^y$"
+            r"^suitability$", r"^should[-_]hire$", r"^outcome$", r"^y$", r"^loan[_ ]?status$"
         ],
         "prediction": [
             r"^prediction$", r"^pred$", r"^predicted$", r"^hired[-_]by[-_]expert$",
@@ -71,19 +72,18 @@ def normalize_dataframe_headers(df: pd.DataFrame) -> pd.DataFrame:
     
     df.columns = final_columns
 
+    if fast_mode:
+        return df
+
     # ── AI Fallback ─────────────────────────────────────────────────────────
-    # If critical columns are still missing, ask Gemini to identify them
     critical = {"ground_truth", "prediction"}
     if not critical.issubset(set(df.columns)):
         try:
             from app.services.discovery_service import ai_discover_column_mapping
-            # Run on ORIGINAL df (before rename) so Gemini sees original names
             original_df = df.rename(columns={v: k for k, v in new_columns.items()})
             ai_mapping = ai_discover_column_mapping(original_df)
             if ai_mapping:
-                print(f"[SmartMapper] AI discovered column mapping: {ai_mapping}")
                 df = df.rename(columns={
-                    # Map from existing (possibly cleaned) name to standard
                     new_columns.get(orig, normalize_string(orig)): std
                     for orig, std in ai_mapping.items()
                 })
@@ -91,22 +91,14 @@ def normalize_dataframe_headers(df: pd.DataFrame) -> pd.DataFrame:
             print(f"[SmartMapper] AI fallback error: {e}")
 
     # ── Last-Resort Auto-Detection ───────────────────────────────────────────
-    # If still missing critical columns, scan for binary columns and
-    # promote the most likely one to ground_truth/prediction.
-    # This works even when Gemini is unavailable (rate limit, no API key, etc.)
     cols = set(df.columns)
     if "ground_truth" not in cols or "prediction" not in cols:
         _auto_detect_outcome(df)
-        cols = set(df.columns)
 
-    # If we found ground_truth but not prediction, copy it
     if "ground_truth" in set(df.columns) and "prediction" not in set(df.columns):
         df["prediction"] = df["ground_truth"]
-        print("[SmartMapper] No 'prediction' column found — using 'ground_truth' as prediction.")
 
     # ── Drop Useless Identifiers ─────────────────────────────────────────────
-    # High-cardinality string columns (like Address, Employee ID, Name) cause
-    # memory explosions and crashes during ML model training. Let's auto-drop them.
     df = _drop_identifier_columns(df)
 
     return df
