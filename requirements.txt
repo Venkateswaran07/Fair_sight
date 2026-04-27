@@ -13,3 +13,4 @@ python-multipart
 reportlab
 google-cloud-firestore
 google-cloud-aiplatform
+google-generativeai

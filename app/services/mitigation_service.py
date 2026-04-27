@@ -67,9 +67,10 @@ class MitigationService:
             )
 
         # ── 2. Label-encode all categorical columns ──────────────────────────
+        from pandas.api.types import is_numeric_dtype
         le_map: Dict[str, LabelEncoder] = {}
         for col in df.columns:
-            if df[col].dtype == object or str(df[col].dtype) == "category":
+            if not is_numeric_dtype(df[col]):
                 le = LabelEncoder()
                 df[col] = le.fit_transform(df[col].astype(str))
                 le_map[col] = le
@@ -88,8 +89,8 @@ class MitigationService:
             raise ValueError(
                 f"Protected column '{protected_col}' has fewer than 2 unique values."
             )
-        privileged_val   = int(vc.index[0])   # majority class
-        unprivileged_val = int(vc.index[1])    # second-most-common class
+        privileged_val   = vc.index[0]   # majority class
+        unprivileged_val = vc.index[1]    # second-most-common class
 
         # Human-readable labels (decoded from LabelEncoder if available)
         def _decode_prot(val: int) -> str:
@@ -135,10 +136,10 @@ class MitigationService:
         acc_orig = float(accuracy_score(y_test, y_pred_orig))
         acc_rew  = float(accuracy_score(y_test, y_pred_rew))
 
-        dpd_orig, eod_orig = self._fairness_metrics(
+        dpd_orig, eod_orig, dir_orig = self._fairness_metrics(
             y_test, y_pred_orig, prot_test, privileged_val, unprivileged_val
         )
-        dpd_rew, eod_rew = self._fairness_metrics(
+        dpd_rew, eod_rew, dir_rew = self._fairness_metrics(
             y_test, y_pred_rew, prot_test, privileged_val, unprivileged_val
         )
 
@@ -147,16 +148,19 @@ class MitigationService:
             "accuracy":                      round(acc_orig, 4),
             "demographic_parity_difference": round(dpd_orig, 4),
             "equal_opportunity_difference":  round(eod_orig, 4),
+            "disparate_impact_ratio":        round(dir_orig, 4),
         }
         after = {
             "accuracy":                      round(acc_rew, 4),
             "demographic_parity_difference": round(dpd_rew, 4),
             "equal_opportunity_difference":  round(eod_rew, 4),
+            "disparate_impact_ratio":        round(dir_rew, 4),
         }
 
         # Positive → fairness improved; negative → fairness worsened
         dpd_improvement = round(dpd_orig - dpd_rew, 4)
         eod_improvement = round(eod_orig - eod_rew, 4)
+        dir_improvement = round(dir_rew - dir_orig, 4) # DIR improvement is ratio increase (closer to 1)
 
         return {
             # ── User-requested fields ───────────────────────────────────────
@@ -166,6 +170,7 @@ class MitigationService:
             "fairness_improvement": dpd_improvement,
             # ── Context ────────────────────────────────────────────────────
             "eod_improvement":    eod_improvement,
+            "dir_improvement":    dir_improvement,
             "num_rows_total":     len(df),
             "num_rows_train":     int(len(X_train)),
             "num_rows_test":      int(len(X_test)),
@@ -253,28 +258,31 @@ class MitigationService:
         protected: np.ndarray,
         privileged_val: int,
         unprivileged_val: int,
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, float]:
         """
-        Compute Demographic Parity Difference and Equal Opportunity Difference
-        between the privileged and unprivileged groups.
-
-        Returns
-        -------
-        (dpd, eod)  both in [0, 1]
+        Compute DPD, EOD, and DIR between privileged and unprivileged groups.
         """
         priv_mask   = protected == privileged_val
         unpriv_mask = protected == unprivileged_val
 
-        # ── DPD: |approval_rate_priv - approval_rate_unpriv| ────────────────
         ar_priv   = float(y_pred[priv_mask].mean())   if priv_mask.sum()   > 0 else 0.0
         ar_unpriv = float(y_pred[unpriv_mask].mean()) if unpriv_mask.sum() > 0 else 0.0
         dpd       = abs(ar_priv - ar_unpriv)
+        
+        # DIR: ar_unpriv / ar_priv (capped for stability)
+        if ar_priv > 0:
+            dir_ratio = ar_unpriv / ar_priv
+        else:
+            dir_ratio = 1.0 if ar_unpriv == 0 else 10.0
+        dir_val = min(dir_ratio, 5.0) # cap at 5x
 
-        # ── EOD: |TPR_priv - TPR_unpriv| ────────────────────────────────────
         priv_pos   = priv_mask   & (y_true == 1)
+        unpriv_pos = unprivileged_val == protected if isinstance(protected, int) else (protected == unprivileged_val)
+        # Fix unpriv_pos mask logic
         unpriv_pos = unpriv_mask & (y_true == 1)
+        
         tpr_priv   = float(y_pred[priv_pos].mean())   if priv_pos.sum()   > 0 else 0.0
         tpr_unpriv = float(y_pred[unpriv_pos].mean()) if unpriv_pos.sum() > 0 else 0.0
         eod        = abs(tpr_priv - tpr_unpriv)
 
-        return dpd, eod
+        return dpd, eod, dir_val

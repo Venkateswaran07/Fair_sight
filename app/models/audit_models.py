@@ -439,6 +439,9 @@ class MitigationGroupMetrics(BaseModel):
     equal_opportunity_difference: float = Field(
         ..., description="Absolute TPR difference between privileged and unprivileged groups."
     )
+    disparate_impact_ratio: float = Field(
+        ..., description="Ratio of selection rates (unprivileged / privileged)."
+    )
 
 
 class MitigationResponse(BaseModel):
@@ -452,10 +455,11 @@ class MitigationResponse(BaseModel):
     )
     fairness_improvement: float = Field(
         ..., description="DPD decrease from reweighing (before.dpd − after.dpd). "
-                         "Positive means bias was reduced."
+        "Positive means bias was reduced."
     )
     # ── Context ──────────────────────────────────────────────────────
     eod_improvement:    float
+    dir_improvement:    float
     num_rows_total:     int
     num_rows_train:     int
     num_rows_test:      int

@@ -28,7 +28,7 @@ class AuditService:
         return {
             "session_id": session_id,
             "headers": list(df.columns),
-            "preview_rows": df.head(15).values.tolist(),
+            "preview_rows": df.head(100).values.tolist(),
             "total_rows": len(df)
         }
 

@@ -54,6 +54,7 @@ from app.services.cf_explainer_service import CFExplainerService
 from app.services.gemini_explain_service import GeminiExplainService
 from app.services.audit_report_service import AuditReportService
 from app.services.mitigation_service import MitigationService
+from app.services.insights_service import insights_svc
 
 router = APIRouter()
 audit_svc = AuditService()
@@ -112,6 +113,22 @@ async def upload_dataset(file: UploadFile = File(...)):
             status_code=400, 
             content={"error": "Failed to process CSV", "detail": str(exc)}
         )
+
+
+@router.get("/applicants/{session_id}")
+async def get_applicants(session_id: str):
+    """
+    Retrieve the list of applicants for a session to show in the audit log.
+    """
+    try:
+        df = audit_svc.get_dataset(session_id)
+        # Limit to first 1000 for performance
+        data = df.head(1000).to_dict(orient="records")
+        return {"total": len(df), "applicants": data, "headers": list(df.columns)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +371,8 @@ async def performance(
             return JSONResponse(content=result)
         except KeyError:
             raise HTTPException(status_code=404, detail="Session not found")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
 
     if not file:
         raise HTTPException(status_code=400, detail="Either file or session_id is required")
@@ -622,13 +641,16 @@ async def generate_report(request: AuditReportRequest):
 @router.post("/mitigate", response_model=MitigationResponse)
 async def mitigate(
     file: UploadFile = File(
-        ...,
-        description="Training dataset CSV — must contain the target column and the protected column.",
+        None,
+        description="Training dataset CSV. If omitted, session_id must be provided.",
+    ),
+    session_id: str = Form(
+        None,
+        description="Session ID from /audit/upload. If omitted, file must be provided.",
     ),
     target_column: str = Form(
-        ...,
-        description="Name of the target/label column. Must be binary (0 = unfavourable, 1 = favourable). "
-                    "Non-binary values are mapped automatically: max value → 1, everything else → 0.",
+        None,
+        description="Name of the target/label column. If omitted, will try to auto-detect.",
     ),
     protected_column: str = Form(
         ...,
@@ -638,52 +660,77 @@ async def mitigate(
     """
     Apply **IBM AIF360 Reweighing** to the dataset and compare a baseline
     `RandomForestClassifier` with a fairness-reweighed one.
-
-    **What Reweighing does**
-
-    Assigns a per-instance training weight so that the joint distribution of
-    *(label, protected attribute)* in the weighted training set matches the
-    distribution that would be expected if label and attribute were independent.
-    This satisfies demographic parity in expectation without modifying the data.
-
-    **Evaluation**
-
-    Both models are evaluated on an 80 / 20 stratified held-out test set so
-    the reported metrics reflect out-of-sample generalisation.
-
-    **Interpreting the response**
-
-    | Field | Meaning |
-    |---|---|
-    | `accuracy_cost` | Accuracy drop caused by reweighing (positive = small cost) |
-    | `fairness_improvement` | DPD reduction (positive = bias decreased) |
-    | `eod_improvement` | EOD reduction (positive = bias decreased) |
-
-    **Integration with `/audit/report`**
-
-    The response includes `method`, `original_metrics`, and `mitigated_metrics`
-    fields that map directly onto the `MitigationData` schema expected by
-    `POST /audit/report`, so you can pass this response body straight through.
     """
     import io as _io
     import pandas as _pd
 
-    # ── Parse CSV ────────────────────────────────────────────────────────────
-    try:
-        contents = await file.read()
-        df = _pd.read_csv(_io.BytesIO(contents))
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not parse CSV: {exc}")
+    # ── 1. Resolve DataFrame ────────────────────────────────────────────────
+    df: _pd.DataFrame = _pd.DataFrame()
+    
+    if session_id:
+        try:
+            df = audit_svc.get_dataset(session_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Session not found")
+    elif file:
+        try:
+            contents = await file.read()
+            df = _pd.read_csv(_io.BytesIO(contents))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not parse CSV: {exc}")
+    else:
+        raise HTTPException(status_code=400, detail="Either file or session_id is required")
 
     if df.empty:
-        raise HTTPException(status_code=400, detail="Uploaded CSV is empty.")
+        raise HTTPException(status_code=400, detail="Dataset is empty.")
 
-    # ── Run mitigation pipeline ──────────────────────────────────────────────
+    # ── 2. Resolve Target Column ────────────────────────────────────────────
+    # If not provided, use the first detected outcome column
+    target = target_column
+    if not target:
+        from app.utils.data_utils import normalize_dataframe_headers
+        df = normalize_dataframe_headers(df, fast_mode=True)
+        target = "ground_truth"
+    
+    if not target or target not in df.columns:
+        raise HTTPException(
+            status_code=422, 
+            detail=f"Target column '{target}' not found. Please specify target_column explicitly."
+        )
+
+    # ── 3. Run mitigation pipeline ──────────────────────────────────────────
     try:
-        result = mitigation_svc.run(df, target_column, protected_column)
+        # Also normalize the protected_column name so it matches the standardized DF
+        from app.utils.data_utils import normalize_string
+        normalized_protected = normalize_string(protected_column)
+        
+        # Check if it exists after normalization
+        if normalized_protected not in df.columns:
+            # Fallback to the original if normalization changed it too much
+            if protected_column not in df.columns:
+                raise ValueError(f"Protected column '{protected_column}' not found in dataset headers.")
+            normalized_protected = protected_column
+
+        result = mitigation_svc.run(df, target, normalized_protected)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Mitigation failed: {exc}")
 
     return result
+
+@router.post("/insights")
+async def get_insights(
+    session_id: str = Form(...),
+    protected_column: str = Form(...),
+    fairness_json: str = Form(...)
+):
+    """
+    Generate AI recommendations based on fairness results.
+    """
+    try:
+        fairness_data = json.loads(fairness_json)
+        explanation = insights_svc.get_fairness_insights(fairness_data, protected_column)
+        return {"insights": explanation}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

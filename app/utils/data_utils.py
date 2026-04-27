@@ -72,16 +72,25 @@ def normalize_dataframe_headers(df: pd.DataFrame, fast_mode: bool = False) -> pd
     
     df.columns = final_columns
 
+    # ── Last-Resort Auto-Detection (Cheap, run even in fast_mode) ───────────
+    cols = set(df.columns)
+    if "ground_truth" not in cols or "prediction" not in cols:
+        _auto_detect_outcome(df)
+
+    if "ground_truth" in set(df.columns) and "prediction" not in set(df.columns):
+        df["prediction"] = df["ground_truth"]
+
     if fast_mode:
         return df
 
-    # ── AI Fallback ─────────────────────────────────────────────────────────
+    # ── AI Fallback (Only when not in fast_mode) ───────────────────────────
     critical = {"ground_truth", "prediction"}
     if not critical.issubset(set(df.columns)):
         try:
             from app.services.discovery_service import ai_discover_column_mapping
-            original_df = df.rename(columns={v: k for k, v in new_columns.items()})
-            ai_mapping = ai_discover_column_mapping(original_df)
+            # Map back to original names for AI discovery
+            original_mapping = {v: k for k, v in new_columns.items()}
+            ai_mapping = ai_discover_column_mapping(df.rename(columns=original_mapping))
             if ai_mapping:
                 df = df.rename(columns={
                     new_columns.get(orig, normalize_string(orig)): std
@@ -89,14 +98,6 @@ def normalize_dataframe_headers(df: pd.DataFrame, fast_mode: bool = False) -> pd
                 })
         except Exception as e:
             print(f"[SmartMapper] AI fallback error: {e}")
-
-    # ── Last-Resort Auto-Detection ───────────────────────────────────────────
-    cols = set(df.columns)
-    if "ground_truth" not in cols or "prediction" not in cols:
-        _auto_detect_outcome(df)
-
-    if "ground_truth" in set(df.columns) and "prediction" not in set(df.columns):
-        df["prediction"] = df["ground_truth"]
 
     # ── Drop Useless Identifiers ─────────────────────────────────────────────
     df = _drop_identifier_columns(df)

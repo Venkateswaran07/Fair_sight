@@ -22,6 +22,9 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Cell,
 } from 'recharts'
+import MitigationComparison from './MitigationComparison'
+import FairnessInsights from './FairnessInsights'
+import FairnessScoreGauge from './FairnessScoreGauge'
 
 /* ── Design tokens (match global design system) ─────────────────────── */
 const ACCENT     = '#1D4ED8'
@@ -590,8 +593,21 @@ export default function AuditDashboard({
   performanceResult  = null,
   fairnessResult     = null,
   proxyResult        = null,
+  mitigationResult   = null,
+  sessionId          = null,
+  onRunMitigation    = null,
+  loadingMitigation  = false,
 }) {
-  const hasAnyData = demographicsResult || performanceResult || fairnessResult || proxyResult
+  console.log("[AuditDashboard] Render. Mitigation Data:", mitigationResult)
+  
+  // Calculate Fairness Score (1 - DPD)
+  const dpdBefore = fairnessResult?.metrics?.demographic_parity_difference?.value || 0
+  const scoreBefore = 1 - dpdBefore
+  
+  const dpdAfter = mitigationResult?.after?.demographic_parity_difference
+  const scoreAfter = dpdAfter !== undefined ? 1 - dpdAfter : null
+
+  const hasAnyData = demographicsResult || performanceResult || fairnessResult || proxyResult || mitigationResult
 
   if (!hasAnyData) {
     return (
@@ -603,10 +619,82 @@ export default function AuditDashboard({
   }
 
   return (
-    <div className="font-sans text-gray-900">
+    <div className="font-sans text-gray-900 space-y-8">
+      {/* Narrative Insight Layer */}
+      {fairnessResult && (
+        <div className="bg-white border-l-4 border-red-600 p-5 flex items-start gap-4 animate-in fade-in slide-in-from-top-4 duration-1000 shadow-sm">
+          <div>
+            <h4 className="text-red-600 font-bold uppercase tracking-tight">Bias Insight Detected</h4>
+            <p className="text-gray-700 text-sm mt-1">
+              {fairnessResult.groups[0]} applicants have a {(fairnessResult.metrics.demographic_parity_difference.value * 100).toFixed(1)}% lower approval rate than {fairnessResult.groups[1]} applicants.
+              {proxyResult?.num_high_risk > 0 && ` Additionally, ${proxyResult.high_risk_features[0]} is acting as a potential proxy for ${fairnessResult.protected_column}.`}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Insight Cards */}
+      {fairnessResult && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="bg-white border border-gray-100 p-4 rounded-xl shadow-sm">
+            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Who is affected?</p>
+            <p className="text-sm font-semibold text-gray-900 mt-1">{fairnessResult.groups[0]} group</p>
+          </div>
+          <div className="bg-white border border-gray-100 p-4 rounded-xl shadow-sm">
+            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">How severe?</p>
+            <p className="text-sm font-semibold text-red-600 mt-1">
+              {fairnessResult.metrics.demographic_parity_difference.value > 0.1 ? 'HIGH BIAS' : 'MEDIUM BIAS'}
+            </p>
+          </div>
+          <div className="bg-white border border-gray-100 p-4 rounded-xl shadow-sm">
+            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">What caused it?</p>
+            <p className="text-sm text-gray-600 mt-1 line-clamp-2">Historical representation gaps in training data.</p>
+          </div>
+          <div className="bg-white border border-gray-100 p-4 rounded-xl shadow-sm">
+            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Recommended Fix</p>
+            <p className="text-sm text-blue-600 font-medium mt-1">IBM Reweighing</p>
+          </div>
+        </div>
+      )}
+
+      {/* Fairness Score Section */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+         <FairnessScoreGauge 
+            score={scoreBefore} 
+            label="Baseline Fairness Score" 
+         />
+         {scoreAfter !== null && (
+           <FairnessScoreGauge 
+              score={scoreAfter} 
+              label="Optimized Fairness Score" 
+              beforeScore={scoreBefore}
+           />
+         )}
+      </div>
       <GroupSizeSection      demographicsResult={demographicsResult} />
       <PerformanceSection    performanceResult={performanceResult}   />
       <FairnessCardsSection  fairnessResult={fairnessResult}         />
+      <FairnessInsights      
+        sessionId={sessionId} 
+        fairnessResult={fairnessResult} 
+        protectedColumn={demographicsResult?.columns_analyzed?.[0]} 
+      />
+
+      {mitigationResult && (
+        <div id="mitigation-results" className="scroll-mt-10 animate-in fade-in slide-in-from-top-4 duration-1000">
+          <MitigationComparison data={mitigationResult} />
+        </div>
+      )}
+
+      {!mitigationResult && loadingMitigation && (
+        <div className="flex flex-col items-center py-10 border-t border-gray-100 animate-in fade-in">
+           <div className="flex flex-col items-center gap-3">
+             <div className="w-8 h-8 border-3 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+             <p className="text-sm font-semibold text-blue-600 tracking-tight">AI Optimizing Model Fairness...</p>
+           </div>
+        </div>
+      )}
+
       <ProxyRiskSection      proxyResult={proxyResult}               />
     </div>
   )

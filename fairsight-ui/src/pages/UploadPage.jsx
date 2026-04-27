@@ -158,12 +158,22 @@ export default function UploadPage() {
       const performance  = await fetchWithSession('/audit/performance', predictSessionId, { protected_columns: JSON.stringify(cols) })
       const fairness     = await fetchWithSession('/audit/fairness', predictSessionId, { protected_column: cols[0], positive_label: '1' })
       const proxies      = await fetchWithSession('/audit/proxies', datasetSessionId, { protected_columns: JSON.stringify(cols) })
+      
+      // Run mitigation on the primary protected attribute
+      let mitigation = null
+      try {
+        mitigation = await fetchWithSession('/audit/mitigate', datasetSessionId, { protected_column: cols[0] })
+      } catch (me) {
+        console.warn("Mitigation analysis skipped or failed:", me)
+      }
 
       const fullResult = { 
         demographics, 
         performance, 
         fairness, 
         proxies,
+        mitigation,
+        session_id: predictSessionId,
         protected_attributes: cols,
         fairness_assessment: (fairness.overall_pass) ? "FAIR" : "BIASED",
         metrics: fairness
